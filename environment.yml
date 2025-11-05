@@ -1,0 +1,16 @@
+name: omni
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - openjdk=8
+  - orekit==12.1.2
+  - pip
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - jupyterlab
+  - ipykernel
+  - pip:
+      - git+https://gitlab.orekit.org/orekit/orekit-data.git
