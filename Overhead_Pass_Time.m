@@ -1,4 +1,3 @@
-close all;
 clear all;
 clc;
 
@@ -21,3 +20,4 @@ O_omega = abs(omega_sat + omega_mars); %or minus depending on the orbit directio
 
 
 T = (2*psi_max)./O_omega %in seconds
+
