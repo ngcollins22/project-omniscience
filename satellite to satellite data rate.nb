@@ -1,0 +1,301 @@
+(* Content-type: application/vnd.wolfram.mathematica *)
+
+(*** Wolfram Notebook File ***)
+(* http://www.wolfram.com/nb *)
+
+(* CreatedBy='Mathematica 14.0' *)
+
+(*CacheID: 234*)
+(* Internal cache information:
+NotebookFileLineBreakTest
+NotebookFileLineBreakTest
+NotebookDataPosition[       158,          7]
+NotebookDataLength[     10122,        293]
+NotebookOptionsPosition[      9319,        271]
+NotebookOutlinePosition[      9726,        287]
+CellTagsIndexPosition[      9683,        284]
+WindowFrame->Normal*)
+
+(* Beginning of Notebook Content *)
+Notebook[{
+
+Cell[CellGroupData[{
+Cell[BoxData[{
+ RowBox[{"Clear", "[", "\"\<Global`*\>\"", "]"}], "\n", 
+ RowBox[{
+  RowBox[{
+   RowBox[{"SNRdB", " ", "=", "20"}], ";"}], 
+  RowBox[{"(*", "dB", "*)"}]}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{
+   RowBox[{"Xlow", "=", 
+    RowBox[{"8", "*", 
+     SuperscriptBox["10", "9"]}]}], ";"}], 
+  RowBox[{"(*", "Hz", "*)"}]}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{
+   RowBox[{"Kalow", "=", 
+    RowBox[{"26.5", "*", 
+     SuperscriptBox["10", "9"]}]}], ";"}], 
+  RowBox[{"(*", "Hz", "*)"}]}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{
+   RowBox[{"UHFlow", "=", 
+    RowBox[{"300", "*", 
+     SuperscriptBox["10", "6"]}]}], ";"}], 
+  RowBox[{"(*", "Hz", "*)"}]}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{
+   RowBox[{"Llow", "=", 
+    RowBox[{"1", "*", 
+     SuperscriptBox["10", "9"]}]}], ";"}], 
+  RowBox[{"(*", "Hz", "*)"}], "\[IndentingNewLine]"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"Xhigh", "=", 
+   RowBox[{"12", "*", 
+    SuperscriptBox["10", "9"]}]}], ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"Kahigh", "=", 
+   RowBox[{"40", "*", 
+    SuperscriptBox["10", "9"]}]}], ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"UHFhigh", "=", 
+   RowBox[{"3", "*", 
+    SuperscriptBox["10", "9"]}]}], ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{
+   RowBox[{"Lhigh", "=", 
+    RowBox[{"2", "*", 
+     SuperscriptBox["10", "9"]}]}], ";"}], 
+  RowBox[{"(*", "Hz", "*)"}], "\[IndentingNewLine]"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"SNR", "=", 
+   SuperscriptBox["10", 
+    FractionBox["SNRdB", "10"]]}], ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"xl", "=", 
+   RowBox[{"N", "[", 
+    RowBox[{"Cgeneral", "=", 
+     RowBox[{"Xlow", "*", 
+      RowBox[{
+       RowBox[{"Log2", "[", 
+        RowBox[{"1", "+", "SNR"}], "]"}], "/", 
+       RowBox[{"(", 
+        SuperscriptBox["10", "9"], ")"}]}]}]}], "]"}]}], 
+  ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"kal", "=", 
+   RowBox[{"N", "[", 
+    RowBox[{"Cgeneral", "=", 
+     RowBox[{"Kalow", "*", 
+      RowBox[{
+       RowBox[{"Log2", "[", 
+        RowBox[{"1", "+", "SNR"}], "]"}], "/", 
+       RowBox[{"(", 
+        SuperscriptBox["10", "9"], ")"}]}]}]}], "]"}]}], 
+  ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"uhfl", "=", 
+   RowBox[{"N", "[", 
+    RowBox[{"Cgeneral", "=", 
+     RowBox[{"UHFlow", "*", 
+      RowBox[{
+       RowBox[{"Log2", "[", 
+        RowBox[{"1", "+", "SNR"}], "]"}], "/", 
+       RowBox[{"(", 
+        SuperscriptBox["10", "9"], ")"}]}]}]}], "]"}]}], 
+  ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"ll", "=", 
+   RowBox[{"N", "[", 
+    RowBox[{"Cgeneral", "=", 
+     RowBox[{"Llow", "*", 
+      RowBox[{
+       RowBox[{"Log2", "[", 
+        RowBox[{"1", "+", "SNR"}], "]"}], "/", 
+       RowBox[{"(", 
+        SuperscriptBox["10", "9"], ")"}]}]}]}], "]"}]}], 
+  ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"xh", "=", 
+   RowBox[{"N", "[", 
+    RowBox[{"Cgeneral", "=", 
+     RowBox[{"Xhigh", "*", 
+      RowBox[{
+       RowBox[{"Log2", "[", 
+        RowBox[{"1", "+", "SNR"}], "]"}], "/", 
+       RowBox[{"(", 
+        SuperscriptBox["10", "9"], ")"}]}]}]}], "]"}]}], 
+  ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"kah", "=", 
+   RowBox[{"N", "[", 
+    RowBox[{"Cgeneral", "=", 
+     RowBox[{"Kahigh", "*", 
+      RowBox[{
+       RowBox[{"Log2", "[", 
+        RowBox[{"1", "+", "SNR"}], "]"}], "/", 
+       RowBox[{"(", 
+        SuperscriptBox["10", "9"], ")"}]}]}]}], "]"}]}], 
+  ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{"uhfh", "=", 
+   RowBox[{"N", "[", 
+    RowBox[{"Cgeneral", "=", 
+     RowBox[{"UHFhigh", "*", 
+      RowBox[{
+       RowBox[{"Log2", "[", 
+        RowBox[{"1", "+", "SNR"}], "]"}], "/", 
+       RowBox[{"(", 
+        SuperscriptBox["10", "9"], ")"}]}]}]}], "]"}]}], 
+  ";"}], "\[IndentingNewLine]", 
+ RowBox[{
+  RowBox[{
+   RowBox[{"lh", "=", 
+    RowBox[{"N", "[", 
+     RowBox[{"Cgeneral", "=", 
+      RowBox[{"Lhigh", "*", 
+       RowBox[{
+        RowBox[{"Log2", "[", 
+         RowBox[{"1", "+", "SNR"}], "]"}], "/", 
+        RowBox[{"(", 
+         SuperscriptBox["10", "9"], ")"}]}]}]}], "]"}]}], ";"}], 
+  "\[IndentingNewLine]"}], "\[IndentingNewLine]", 
+ RowBox[{"Print", "[", 
+  RowBox[{
+  "\"\<The X band data rate range is \>\"", ",", "xl", ",", "\"\< to \>\"", 
+   ",", "xh", ",", "\"\< Gbits/s\>\""}], "]"}], "\[IndentingNewLine]", 
+ RowBox[{"Print", "[", 
+  RowBox[{
+  "\"\<The Ka band data rate range is \>\"", ",", "kal", ",", "\"\< to \>\"", 
+   ",", "kah", ",", "\"\< Gbits/s\>\""}], "]"}], "\[IndentingNewLine]", 
+ RowBox[{"Print", "[", 
+  RowBox[{
+  "\"\<The UHF band data rate range is \>\"", ",", "uhfl", ",", 
+   "\"\< to \>\"", ",", "uhfh", ",", "\"\< Gbits/s\>\""}], 
+  "]"}], "\[IndentingNewLine]", 
+ RowBox[{"Print", "[", 
+  RowBox[{
+  "\"\<The L band data rate range is \>\"", ",", "ll", ",", "\"\< to \>\"", 
+   ",", "lh", ",", "\"\< Gbits/s\>\""}], 
+  "]"}], "\[IndentingNewLine]"}], "Input",
+ CellChangeTimes->{{3.972313449626623*^9, 3.972313519857403*^9}, {
+  3.9723135612108116`*^9, 3.9723135895173817`*^9}, {3.9723136288298492`*^9, 
+  3.972313726902052*^9}, {3.9723138149864388`*^9, 3.97231382998011*^9}, {
+  3.9723139212710857`*^9, 3.9723139245919*^9}, {3.972314196623581*^9, 
+  3.972314256119362*^9}, {3.972314320883074*^9, 3.97231433385198*^9}, {
+  3.9723144498691044`*^9, 3.972314607095705*^9}, {3.972314642526188*^9, 
+  3.9723147877517624`*^9}, {3.972314923158531*^9, 3.972314924971298*^9}, {
+  3.9723152694016438`*^9, 3.9723152775080147`*^9}, {3.9723154293727093`*^9, 
+  3.9723154662916794`*^9}, {3.972315568620798*^9, 3.972315590566452*^9}, {
+  3.972315627316429*^9, 3.9723156311282444`*^9}, {3.972315672437561*^9, 
+  3.9723156775510273`*^9}, {3.9723157980266056`*^9, 3.97231580256168*^9}},
+ CellLabel->
+  "In[183]:=",ExpressionUUID->"d767bb62-2018-5e4f-ac0c-95d6321fbf1e"],
+
+Cell[CellGroupData[{
+
+Cell[BoxData[
+ InterpretationBox[
+  RowBox[{"\<\"The X band data rate range is \"\>", "\[InvisibleSpace]", 
+   "53.26569186201436`", "\[InvisibleSpace]", "\<\" to \"\>", 
+   "\[InvisibleSpace]", "79.89853779302153`", 
+   "\[InvisibleSpace]", "\<\" Gbits/s\"\>"}],
+  SequenceForm[
+  "The X band data rate range is ", 53.26569186201436, " to ", 
+   79.89853779302153, " Gbits/s"],
+  Editable->False]], "Print",
+ CellChangeTimes->{
+  3.9723146648130646`*^9, {3.972314709949318*^9, 3.972314747965313*^9}, {
+   3.9723149175125217`*^9, 3.9723149267838726`*^9}, 3.972315649701393*^9, 
+   3.972315830188692*^9},
+ CellLabel->
+  "During evaluation of \
+In[183]:=",ExpressionUUID->"c055df0f-4d52-8641-8d19-cce8c105604b"],
+
+Cell[BoxData[
+ InterpretationBox[
+  RowBox[{"\<\"The Ka band data rate range is \"\>", "\[InvisibleSpace]", 
+   "176.44260429292257`", "\[InvisibleSpace]", "\<\" to \"\>", 
+   "\[InvisibleSpace]", "266.3284593100718`", 
+   "\[InvisibleSpace]", "\<\" Gbits/s\"\>"}],
+  SequenceForm[
+  "The Ka band data rate range is ", 176.44260429292257`, " to ", 
+   266.3284593100718, " Gbits/s"],
+  Editable->False]], "Print",
+ CellChangeTimes->{
+  3.9723146648130646`*^9, {3.972314709949318*^9, 3.972314747965313*^9}, {
+   3.9723149175125217`*^9, 3.9723149267838726`*^9}, 3.972315649701393*^9, 
+   3.9723158301917*^9},
+ CellLabel->
+  "During evaluation of \
+In[183]:=",ExpressionUUID->"dcca3e40-ebd0-7b44-9b74-76d62c5218a7"],
+
+Cell[BoxData[
+ InterpretationBox[
+  RowBox[{"\<\"The UHF band data rate range is \"\>", "\[InvisibleSpace]", 
+   "1.9974634448255384`", "\[InvisibleSpace]", "\<\" to \"\>", 
+   "\[InvisibleSpace]", "19.974634448255383`", 
+   "\[InvisibleSpace]", "\<\" Gbits/s\"\>"}],
+  SequenceForm[
+  "The UHF band data rate range is ", 1.9974634448255384`, " to ", 
+   19.974634448255383`, " Gbits/s"],
+  Editable->False]], "Print",
+ CellChangeTimes->{
+  3.9723146648130646`*^9, {3.972314709949318*^9, 3.972314747965313*^9}, {
+   3.9723149175125217`*^9, 3.9723149267838726`*^9}, 3.972315649701393*^9, 
+   3.972315830194685*^9},
+ CellLabel->
+  "During evaluation of \
+In[183]:=",ExpressionUUID->"5de5871e-af14-1c41-8c85-c65db7de0f74"],
+
+Cell[BoxData[
+ InterpretationBox[
+  RowBox[{"\<\"The L band data rate range is \"\>", "\[InvisibleSpace]", 
+   "6.658211482751795`", "\[InvisibleSpace]", "\<\" to \"\>", 
+   "\[InvisibleSpace]", "13.31642296550359`", 
+   "\[InvisibleSpace]", "\<\" Gbits/s\"\>"}],
+  SequenceForm[
+  "The L band data rate range is ", 6.658211482751795, " to ", 
+   13.31642296550359, " Gbits/s"],
+  Editable->False]], "Print",
+ CellChangeTimes->{
+  3.9723146648130646`*^9, {3.972314709949318*^9, 3.972314747965313*^9}, {
+   3.9723149175125217`*^9, 3.9723149267838726`*^9}, 3.972315649701393*^9, 
+   3.9723158302006016`*^9},
+ CellLabel->
+  "During evaluation of \
+In[183]:=",ExpressionUUID->"800e4370-d885-3343-8398-8900457cf589"]
+}, Open  ]]
+}, Open  ]]
+},
+WindowSize->{571, 627.5},
+WindowMargins->{{Automatic, 109.5}, {32, Automatic}},
+FrontEndVersion->"14.0 for Microsoft Windows (64-bit) (December 12, 2023)",
+StyleDefinitions->"Default.nb",
+ExpressionUUID->"dab5ba69-f44d-d745-8cba-379faa22d80e"
+]
+(* End of Notebook Content *)
+
+(* Internal cache information *)
+(*CellTagsOutline
+CellTagsIndex->{}
+*)
+(*CellTagsIndex
+CellTagsIndex->{}
+*)
+(*NotebookFileOutline
+Notebook[{
+Cell[CellGroupData[{
+Cell[580, 22, 5826, 171, 629, "Input",ExpressionUUID->"d767bb62-2018-5e4f-ac0c-95d6321fbf1e"],
+Cell[CellGroupData[{
+Cell[6431, 197, 709, 16, 22, "Print",ExpressionUUID->"c055df0f-4d52-8641-8d19-cce8c105604b"],
+Cell[7143, 215, 712, 16, 22, "Print",ExpressionUUID->"dcca3e40-ebd0-7b44-9b74-76d62c5218a7"],
+Cell[7858, 233, 719, 16, 22, "Print",ExpressionUUID->"5de5871e-af14-1c41-8c85-c65db7de0f74"],
+Cell[8580, 251, 711, 16, 22, "Print",ExpressionUUID->"800e4370-d885-3343-8398-8900457cf589"]
+}, Open  ]]
+}, Open  ]]
+}
+]
+*)
+
