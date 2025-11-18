@@ -39,7 +39,7 @@ nodes_eqlowop3 = size(EqLowOp3,1);
 nodes_eqlowop4 = size(EqLowOp4,1);
 
 
-%% Number of Links
+%% Number of Links and Redundancy
 
 links_mgps = nnz(MGPS)/2;
 links_gl2 = nnz(GL2)/2;
@@ -51,39 +51,50 @@ links_eqlowop2 = nnz(EqLowOp2)/2;
 links_eqlowop3 = nnz(EqLowOp3)/2;
 links_eqlowop4 = nnz(EqLowOp4)/2;
 
-minlinks_mgps = nodes_
-minlinks_gl2 = nnz(GL2)/2;
-minlinks_eqop1 = nnz(EqOp1)/2;
-minlinks_eqop2 = nnz(EqOp2)/2;
-minlinks_eqop3 = nnz(EqOp3)/2;
-minlinks_eqop4 = nnz(EqOp4)/2;
-minlinks_eqlowop2 = nnz(EqLowOp2)/2;
-minlinks_eqlowop3 = nnz(EqLowOp3)/2;
-minlinks_eqlowop4 = nnz(EqLowOp4)/2;
+minlinks_mgps = nodes_mgps-1;
+minlinks_gl2 = nodes_gl2-1;
+minlinks_eqop1 = nodes_eqop1-1;
+minlinks_eqop2 = nodes_eqop2-1;
+minlinks_eqop3 = nodes_eqop3-1;
+minlinks_eqop4 = nodes_eqop4-1;
+minlinks_eqlowop2 = nodes_eqlowop2-1;
+minlinks_eqlowop3 = nodes_eqlowop3-1;
+minlinks_eqlowop4 = nodes_eqlowop4-1;
+
+redundancy_mgps = links_mgps-minlinks_mgps;
+redundancy_gl2 = links_gl2-minlinks_gl2;
+redundancy_eqop1 = links_eqop1-minlinks_eqop1;
+redundancy_eqop2 = links_eqop2-minlinks_eqop2;
+redundancy_eqop3 = links_eqop3-minlinks_eqop3;
+redundancy_eqop4 = links_eqop4-minlinks_eqop4;
+redundancy_eqlowop2 = links_eqlowop2-minlinks_eqlowop2;
+redundancy_eqlowop3 = links_eqlowop3-minlinks_eqlowop3;
+redundancy_eqlowop4 = links_eqlowop4-minlinks_eqlowop4;
+
 
 %% Degree per node
 
-degree_mgps = sum(MGPS,2);
-degree_gl2 = sum(GL2,2);
-degree_eqop1 = sum(EqOp1,2);
-degree_eqop2 = sum(EqOp2,2);
-degree_eqop3 = sum(EqOp3,2);
-degree_eqop4 = sum(EqOp4,2);
-degree_eqlowop2 = sum(EqLowOp2,2);
-degree_eqlowop3 = sum(EqLowOp3,2);
-degree_eqlowop4 = sum(EqLowOp4,2);
+degree_mgps = mean(sum(MGPS,2));
+degree_gl2 = mean(sum(GL2,2));
+degree_eqop1 = mean(sum(EqOp1,2));
+degree_eqop2 = mean(sum(EqOp2,2));
+degree_eqop3 = mean(sum(EqOp3,2));
+degree_eqop4 = mean(sum(EqOp4,2));
+degree_eqlowop2 = mean(sum(EqLowOp2,2));
+degree_eqlowop3 = mean(sum(EqLowOp3,2));
+degree_eqlowop4 = mean(sum(EqLowOp4,2));
 
 %% Density per node
 
 density_mgps = degree_mgps/(nodes_mgps-1);
-density_gl2 = degree_mgps/(nodes_mgps-1);
-density_eqop1 = degree_mgps/(nodes_mgps-1);
-density_eqop2 = degree_mgps/(nodes_mgps-1);
-density_eqop3 = degree_mgps/(nodes_mgps-1);
-density_eqop4 = degree_mgps/(nodes_mgps-1);
-density_eqlowop2 = degree_mgps/(nodes_mgps-1);
-density_eqlowop3 = degree_mgps/(nodes_mgps-1);
-density_eqlowop4 = degree_mgps/(nodes_mgps-1);
+density_gl2 = degree_gl2/(nodes_gl2-1);
+density_eqop1 = degree_eqop1/(nodes_eqop1-1);
+density_eqop2 = degree_eqop2/(nodes_eqop2-1);
+density_eqop3 = degree_eqop3/(nodes_eqop3-1);
+density_eqop4 = degree_eqop4/(nodes_eqop4-1);
+density_eqlowop2 = degree_eqlowop2/(nodes_eqlowop2-1);
+density_eqlowop3 = degree_eqlowop3/(nodes_eqlowop3-1);
+density_eqlowop4 = degree_eqlowop4/(nodes_eqlowop4-1);
 
 %% clustering
 
@@ -245,9 +256,17 @@ clustering_eqlowop4 = zeros(nodes_mgps,1);
     avgclustering_eqlowop3 = mean(clustering_eqlowop3);
     avgclustering_eqlowop4 = mean(clustering_eqlowop4);
 
+%% Results
 
-%% Redundancy
+Orbit = ["MGPS","GL2","EqOp1","EqOp2","EqOp3","EqOp4","EqLowOp2","EqLowOp3","EqLowOp4"]';
+Number_of_Nodes = [nodes_mgps, nodes_gl2, nodes_eqop1, nodes_eqop2, nodes_eqop3, nodes_eqop4, nodes_eqlowop2, nodes_eqlowop3, nodes_eqlowop4]';
+Number_of_Links = [links_mgps, links_gl2, links_eqop1, links_eqop2, links_eqop3, links_eqop4, links_eqlowop2, links_eqlowop3, links_eqlowop4]';
+Redundancy = [redundancy_mgps, redundancy_gl2, redundancy_eqop1, redundancy_eqop2,redundancy_eqop3, redundancy_eqop4, redundancy_eqlowop2,redundancy_eqlowop3, redundancy_eqlowop4]';
+Degree_per_Node = [degree_mgps, degree_gl2, degree_eqop1, degree_eqop2, degree_eqop3, degree_eqop4, degree_eqlowop2, degree_eqlowop3, degree_eqlowop4]';
+Density_per_Node = [density_mgps, density_gl2, density_eqop1, density_eqop2, density_eqop3, density_eqop4, density_eqlowop2, density_eqlowop3, density_eqlowop4]';
+Average_Clustering = [avgclustering_mgps, avgclustering_gl2, avgclustering_eqop1, avgclustering_eqop2, avgclustering_eqop3, avgclustering_eqop4, avgclustering_eqlowop2, avgclustering_eqlowop3, avgclustering_eqlowop4]';
 
+result = table(Orbit, Number_of_Nodes, Number_of_Links, Redundancy,Degree_per_Node, Density_per_Node,Average_Clustering,'VariableNames', {'Orbit','Number_of_Nodes','Number_of_Links','Redundancy','Degree_per_Node','Density_per_Node','Average_Clustering'})
 
 
 
