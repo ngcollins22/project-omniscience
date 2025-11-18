@@ -16,10 +16,11 @@ psi_max = acos(cos_psi_max);
 w_omega = sqrt(mu./(A.^3)); %mean angular rate for circular orbit around mars
 omega_sat = w_omega.*(B./A); %angular rate of sats subpoint on Mars
 omega_mars = (2*pi)/88642; %angular rotation of Mars 
-O_omega = abs(omega_sat + omega_mars); %or minus depending on the orbit direction
+O_omega = abs(omega_sat + omega_mars); 
 
 
 T = (2*psi_max)./O_omega %in seconds
 T_m = T./60 %in minutes
 T_h = T_m./60 % in hours
+
 
