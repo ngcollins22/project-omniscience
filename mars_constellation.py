@@ -1,0 +1,249 @@
+import math
+import orekit
+import numpy as np
+orekit.initVM()
+
+from dataclasses import dataclass
+from typing import List, Dict, Tuple
+
+from orekit.pyhelpers import setup_orekit_curdir
+setup_orekit_curdir(from_pip_library=True)
+
+from org.orekit.bodies import CelestialBodyFactory, OneAxisEllipsoid, GeodeticPoint
+from org.orekit.frames import Frame
+from org.orekit.orbits import KeplerianOrbit, PositionAngleType, WalkerConstellation
+from org.orekit.propagation.analytical import KeplerianPropagator
+from org.orekit.time import AbsoluteDate, TimeScalesFactory
+from org.orekit.utils import PVCoordinates
+from org.orekit.orbits import WalkerConstellationSlot
+from org.orekit.gnss import DOPComputer
+
+
+from java.util import List as JavaList
+from java.util import ArrayList
+
+
+
+@dataclass
+class ConstellationConfig:
+    name: str
+    inclination_deg: float
+    altitude_km: float
+    total_sats: int
+    planes: int
+    phasing: int
+    pattern: str = "DELTA"  # Only "DELTA" supported for now
+
+    def __print__(self):
+        return (f"ConstellationConfig(name={self.name}, inclination_deg={self.inclination_deg}, "
+                f"altitude_km={self.altitude_km}, total_sats={self.total_sats}, "
+                f"planes={self.planes}, phasing={self.phasing}, pattern={self.pattern})")
+
+
+@dataclass
+class Satellite:
+    sat_id: int
+    plane_index: int
+    slot_index: int
+    propagator: KeplerianPropagator
+
+
+@dataclass
+class Constellation:
+    config: ConstellationConfig
+    epoch: AbsoluteDate
+    satellites: List[Satellite]
+    mars_inertial: Frame
+    mars_fixed: Frame
+    mars_shape: OneAxisEllipsoid
+
+def build_constellation(config: ConstellationConfig) -> Constellation:
+    utc = TimeScalesFactory.getUTC()
+    epoch = AbsoluteDate(2025, 1, 1, 0, 0, 0.0, utc)
+
+    mars = CelestialBodyFactory.getMars()
+    mu = mars.getGM()
+    inertial = mars.getInertiallyOrientedFrame()
+    fixed = mars.getBodyOrientedFrame()
+
+    # Mars ellipsoid (IAU value)
+    R_mars = 3394200.0  # meters
+    f_mars = 0.00589
+    mars_shape = OneAxisEllipsoid(R_mars, f_mars, fixed)
+
+    # Reference orbit
+    a = R_mars + config.altitude_km * 1e3
+    e = 0.0
+    i = math.radians(config.inclination_deg)
+    omega = 0.0
+    raan0 = 0.0
+    M0 = 0.0
+
+    ref_orbit = KeplerianOrbit(a, e, i, omega, raan0, M0,
+                                PositionAngleType.MEAN,
+                                inertial, epoch, mu)
+
+    # Walker constellation
+    walker = WalkerConstellation(config.total_sats, config.planes, config.phasing)
+    slot_matrix = walker.buildRegularSlots(ref_orbit)
+
+    satellites = []
+    sat_id = 0
+    for p in range(slot_matrix.size()):
+        plane_slots = JavaList.cast_(slot_matrix.get(p))
+        for s in range(plane_slots.size()):
+            slot = WalkerConstellationSlot.cast_(plane_slots.get(s))
+            orbit = slot.getOrbit()
+            prop = KeplerianPropagator(orbit)
+            satellites.append(Satellite(sat_id, p, s, prop))
+            sat_id += 1
+
+    return Constellation(
+        config=config,
+        epoch=epoch,
+        satellites=satellites,
+        mars_inertial=inertial,
+        mars_fixed=fixed,
+        mars_shape=mars_shape
+    )
+
+def propagate(constellation: Constellation,
+              duration_sec: float,
+              step_sec: float
+              ) -> Tuple[List[AbsoluteDate], Dict[int, List[PVCoordinates]], Dict[int, List[PVCoordinates]]]:
+    times = [constellation.epoch.shiftedBy(float(t)) for t in range(0, int(duration_sec)+1, int(step_sec))]
+
+    inertial_pvs = {sat.sat_id: [] for sat in constellation.satellites}
+    fixed_pvs = {sat.sat_id: [] for sat in constellation.satellites}
+
+    for t in times:
+        for sat in constellation.satellites:
+            state = sat.propagator.propagate(t)
+            pv = state.getPVCoordinates()
+            
+            inertial_pvs[sat.sat_id].append(pv)
+
+            transform = constellation.mars_inertial.getTransformTo(constellation.mars_fixed, t)
+            pv_fixed = transform.transformPVCoordinates(pv)
+            fixed_pvs[sat.sat_id].append(pv_fixed)
+
+    return times, inertial_pvs, fixed_pvs
+
+def compute_ground_tracks(constellation,
+                          times,  # List[AbsoluteDate]
+                          fixed_pvs: Dict[int, List[PVCoordinates]]):
+    """
+    Convert Mars-fixed PVCoordinates into lat/lon ground tracks (degrees).
+
+    times: list[AbsoluteDate] used when generating fixed_pvs (same length as each pv_list)
+    fixed_pvs: dict[sat_id] -> list[PVCoordinates in Mars-fixed frame]
+
+    Returns:
+        tracks: dict[sat_id] -> {"lat": [...], "lon": [...]}
+    """
+    tracks = {}
+    mars_shape = constellation.mars_shape
+    body_frame = constellation.mars_fixed
+
+    for sat_id, pv_list in fixed_pvs.items():
+        if len(pv_list) != len(times):
+            raise ValueError(f"Length mismatch for sat {sat_id}: "
+                             f"{len(pv_list)} PVs vs {len(times)} times")
+
+        lats = []
+        lons = []
+        for t, pv in zip(times, pv_list):
+            # pv is in Mars-fixed frame already; we still must pass the date
+            geodetic = mars_shape.transform(pv.getPosition(), body_frame, t)
+
+            lat_deg = math.degrees(geodetic.getLatitude())
+            lon_deg = math.degrees(geodetic.getLongitude())
+
+            # Normalize longitude to [-180, 180] to match basemap
+            if lon_deg > 180.0:
+                lon_deg -= 360.0
+            elif lon_deg < -180.0:
+                lon_deg += 360.0
+
+            lats.append(lat_deg)
+            lons.append(lon_deg)
+
+        tracks[sat_id] = {"lat": lats, "lon": lons}
+
+    return tracks
+
+def compute_pdop_p95_map(constellation,
+                         times: List,          # List[AbsoluteDate]
+                         lat_min_deg: float = -45.0,
+                         lat_max_deg: float = 45.0,
+                         lat_step_deg: float = 5.0,
+                         lon_min_deg: float = -180.0,
+                         lon_max_deg: float = 180.0,
+                         lon_step_deg: float = 10.0,
+                         min_elev_deg: float = 5.0
+                         ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute PDOP time series and P95 PDOP for a lat/lon grid.
+
+    Returns:
+        lat_vals : 1D array of latitudes (deg)
+        lon_vals : 1D array of longitudes (deg)
+        p95_pdop : 2D array [n_lat, n_lon] with PDOP 95th percentile at each grid point
+                   (NaN where PDOP cannot be computed / insufficient coverage)
+    """
+    mars_shape = constellation.mars_shape
+
+    # Build Java list of propagators once
+    gnss_list = ArrayList()
+    #print(type(gnss_list))
+    for sat in constellation.satellites:
+        gnss_list.add(sat.propagator)
+
+    lat_vals = np.arange(lat_min_deg, lat_max_deg + 1e-6, lat_step_deg)
+    lon_vals = np.arange(lon_min_deg, lon_max_deg + 1e-6, lon_step_deg)
+
+    n_lat = lat_vals.size
+    n_lon = lon_vals.size
+    n_t   = len(times)
+
+    # Store PDOP time series per grid point
+    # shape: (n_lat, n_lon, n_t)
+    pdop_series = np.full((n_lat, n_lon, n_t), np.nan, dtype=float)
+
+    # Pre-create DOPComputers for each grid point
+    dop_computers: Dict[Tuple[int, int], DOPComputer] = {}
+
+
+    min_elev_rad = math.radians(min_elev_deg)
+
+    for i_lat, lat_deg in enumerate(lat_vals):
+        lat_rad = math.radians(lat_deg)
+        for j_lon, lon_deg in enumerate(lon_vals):
+            lon_rad = math.radians(lon_deg)
+            gp = GeodeticPoint(lat_rad, lon_rad, 0.0)  # altitude 0 for now
+            comp = DOPComputer.create(mars_shape, gp).withMinElevation(min_elev_rad)
+            dop_computers[(i_lat, j_lon)] = comp
+
+    # Time loop
+    for k, date in enumerate(times):
+        # For each grid point, compute PDOP at this date
+        for (i_lat, j_lon), comp in dop_computers.items():
+            dop = comp.compute(date, gnss_list)
+            pdop = dop.getPdop()
+            # If fewer than 4 visible sats, PDOP will be NaN; we keep NaN
+            pdop_series[i_lat, j_lon, k] = pdop
+
+    # Now compute P95 along the time axis, ignoring NaNs
+    p95_pdop = np.full((n_lat, n_lon), np.nan, dtype=float)
+    for i_lat in range(n_lat):
+        for j_lon in range(n_lon):
+            series = pdop_series[i_lat, j_lon, :]
+            # Drop NaNs (times with < 4 visible sats)
+            valid = series[~np.isnan(series)]
+            if valid.size == 0:
+                p95 = np.nan
+            else:
+                p95 = np.percentile(valid, 95)
+            p95_pdop[i_lat, j_lon] = p95
+
+    return lat_vals, lon_vals, p95_pdop

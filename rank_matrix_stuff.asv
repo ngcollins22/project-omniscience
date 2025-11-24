@@ -71,7 +71,6 @@ redundancy_eqlowop2 = links_eqlowop2-minlinks_eqlowop2;
 redundancy_eqlowop3 = links_eqlowop3-minlinks_eqlowop3;
 redundancy_eqlowop4 = links_eqlowop4-minlinks_eqlowop4;
 
-
 %% Degree per node
 
 degree_mgps = mean(sum(MGPS,2));

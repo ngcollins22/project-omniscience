@@ -14,3 +14,4 @@ dependencies:
   - ipykernel
   - pip:
       - git+https://gitlab.orekit.org/orekit/orekit-data.git
+      - openpyxl
