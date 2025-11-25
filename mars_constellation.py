@@ -10,7 +10,7 @@ from orekit.pyhelpers import setup_orekit_curdir
 setup_orekit_curdir(from_pip_library=True)
 
 from org.orekit.bodies import CelestialBodyFactory, OneAxisEllipsoid, GeodeticPoint
-from org.orekit.frames import Frame
+from org.orekit.frames import Frame, TopocentricFrame
 from org.orekit.orbits import KeplerianOrbit, PositionAngleType, WalkerConstellation
 from org.orekit.propagation.analytical import KeplerianPropagator
 from org.orekit.time import AbsoluteDate, TimeScalesFactory
@@ -247,3 +247,84 @@ def compute_pdop_p95_map(constellation,
             p95_pdop[i_lat, j_lon] = p95
 
     return lat_vals, lon_vals, p95_pdop
+
+
+
+
+def constellation_meets_5sat_requirement(
+    constellation,
+    start_date: AbsoluteDate = AbsoluteDate(2025, 1, 1, 0, 0, 0.0, TimeScalesFactory.getUTC()),
+    lat_min_deg: float = -45.0,
+    lat_max_deg: float = 45.0,
+    lat_step_deg: float = 5.0,
+    lon_min_deg: float = -180.0,
+    lon_max_deg: float = 180.0,
+    lon_step_deg: float = 10.0,
+    min_elev_deg: float = 10.0,
+    min_sats_in_view: int = 5,
+    time_step_sec: float = 300.0,  # sample every 5 minutes
+) -> bool:
+    """
+    Check if a constellation provides at least `min_sats_in_view` satellites
+    above `min_elev_deg` elevation for all points in the latitude band
+    [lat_min_deg, lat_max_deg] over one Martian day.
+
+    Returns:
+        True  if the requirement is met everywhere for the whole day.
+        False as soon as a violation is detected (early exit).
+    """
+
+    mars_shape = constellation.mars_shape  # OneAxisEllipsoid or similar
+
+    # Precompute list of propagators
+    propagators = [sat.propagator for sat in constellation.satellites]
+
+    # Latitude / longitude grid
+    lat_vals = np.arange(lat_min_deg, lat_max_deg + 1e-6, lat_step_deg)
+    lon_vals = np.arange(lon_min_deg, lon_max_deg + 1e-6, lon_step_deg)
+
+    min_elev_rad = math.radians(min_elev_deg)
+
+    # Build TopocentricFrames for each grid point
+    topo_frames = {}  # (i_lat, j_lon) -> TopocentricFrame
+    for i_lat, lat_deg in enumerate(lat_vals):
+        lat_rad = math.radians(lat_deg)
+        for j_lon, lon_deg in enumerate(lon_vals):
+            lon_rad = math.radians(lon_deg)
+            gp = GeodeticPoint(lat_rad, lon_rad, 0.0)  # altitude = 0
+            topo = TopocentricFrame(mars_shape, gp, f"pt_{i_lat}_{j_lon}")
+            topo_frames[(i_lat, j_lon)] = topo
+
+    # Length of a Martian sidereal day in seconds
+    mars_sidereal_day_sec = 88642.663
+    n_steps = int(math.ceil(mars_sidereal_day_sec / time_step_sec))
+
+    # Main time loop
+    for k in range(n_steps):
+        date = start_date.shiftedBy(k * time_step_sec)
+
+        # Propagate all satellites once at this time (reuse for all grid points)
+        states = [prop.propagate(date) for prop in propagators]
+
+        # For each ground grid point, count visible satellites
+        for (i_lat, j_lon), topo in topo_frames.items():
+            visible_count = 0
+            for state in states:
+                pos = state.getPVCoordinates().getPosition()
+                frame = state.getFrame()
+                elev = topo.getElevation(pos, frame, date)
+
+                if elev >= min_elev_rad:
+                    visible_count += 1
+                    # As soon as we hit the minimum, no need to check more sats here
+                    if visible_count >= min_sats_in_view:
+                        break
+
+            # Requirement violation: fewer than min_sats_in_view at this point/time
+            if visible_count < min_sats_in_view:
+                return False
+
+    # If we get here, no violations were found over the entire day
+    return True
+
+
