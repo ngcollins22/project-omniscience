@@ -336,7 +336,7 @@ def compute_network_metrics(latency_tensor: np.ndarray) -> Tuple[float, float, f
     """
 
     # Convert the latency tensor to a binary adjacency matrix
-    print(latency_tensor.shape)
+    #print(latency_tensor.shape)
 
     # Convert nan -> 0, finite -> 1
     adjacency_matrix = np.where(np.isnan(latency_tensor), 0, 1)
