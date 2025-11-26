@@ -433,32 +433,37 @@ def compute_across_mars_latency(
         Path Cost: sum of latencies along edges
     """
 
+    t_idx = 0
     # Choose a set of ground points on opposite sides of Mars
     mars_shape = constellation.mars_shape
     lat1, lon1 = 0.0, 0.0
     lat2, lon2 = 0.0, 180.0
+
     gp1 = GeodeticPoint(math.radians(lat1), math.radians(lon1), 0.0)
     gp2 = GeodeticPoint(math.radians(lat2), math.radians(lon2), 0.0)
 
-    # First implementation, just use the first time step
-    t_idx = 0
-
-    # Find nearest satellite to each ground point at each time
-    # Convert ground points to Cartesian in inertial frame
     body = constellation.mars_fixed
-    intertial = constellation.inertial_frame
+    inertial = constellation.mars_inertial
     date = times[t_idx]
-    transform_body_to_inertial = body.getTransformTo(intertial, date)
-    pv_gp1_body = constellation.mars_shape.transform(gp1)
-    pv_gp1_inertial = transform_body_to_inertial.transformPVCoordinates(pv_gp1_body)
-    pv_gp2_body = constellation.mars_shape.transform(gp2)
-    pv_gp2_inertial = transform_body_to_inertial.transformPVCoordinates(pv_gp2_body)
-    r_gp1 = np.array([pv_gp1_inertial.getPosition().getX(),
-                      pv_gp1_inertial.getPosition().getY(),
-                      pv_gp1_inertial.getPosition().getZ()])
-    r_gp2 = np.array([pv_gp2_inertial.getPosition().getX(),
-                      pv_gp2_inertial.getPosition().getY(),
-                      pv_gp2_inertial.getPosition().getZ()])
+
+    # Body-fixed -> inertial transform at this date
+    body_to_inertial = body.getTransformTo(inertial, date).toStaticTransform()
+
+    # Geodetic -> Cartesian in body-fixed frame
+    pos_gp1_body = mars_shape.transform(gp1)  # Vector3D in `body`
+    pos_gp2_body = mars_shape.transform(gp2)
+
+    # Body-fixed -> inertial
+    pos_gp1_inertial = body_to_inertial.transformPosition(pos_gp1_body)
+    pos_gp2_inertial = body_to_inertial.transformPosition(pos_gp2_body)
+
+    # Numpy vectors
+    r_gp1 = np.array([pos_gp1_inertial.getX(),
+                    pos_gp1_inertial.getY(),
+                    pos_gp1_inertial.getZ()])
+    r_gp2 = np.array([pos_gp2_inertial.getX(),
+                    pos_gp2_inertial.getY(),
+                    pos_gp2_inertial.getZ()])
     # Find nearest satellite to each ground point
     sat_idx_gp1 = None
     sat_idx_gp2 = None
