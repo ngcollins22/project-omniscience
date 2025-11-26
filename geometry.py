@@ -395,7 +395,7 @@ def calculateCost(planes, sats):
 import math
 
 def approximateOverHeadPassTime(altitude_km):
-    altitude = altitude*1000
+    altitude = altitude_km*1000
     elev_mask_deg=10
     mu = 4.2828e13
     # Convert elevation to radians
