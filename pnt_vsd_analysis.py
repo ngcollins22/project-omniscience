@@ -3,7 +3,7 @@ from orekit.pyhelpers import setup_orekit_curdir
 from mars_constellation import Constellation, ConstellationConfig, build_constellation, propagate, compute_ground_tracks, compute_pdop_p95_map, constellation_meets_5sat_requirement, pdop_p95_requirement_met
 from typing import List
 from read_constellations import read_constellations, clean_path
-from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap
+from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap, plot_across_mars_path
 from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateCost, compute_across_mars_latency
 import csv
 
@@ -124,8 +124,24 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
             print(f"p95 Warm-Start Time Metric (not real time, proportional to real time) P95 over lat +-45°: {p95_warm_start_time_metric:.2f} seconds for constellation '{cfg.name}' ({i}).")
 
             # --- Compute worst-case latency from one side of mars to the other --- 
-            across_mars_latency, path = compute_across_mars_latency(constellation, times, latencies, inertial_pvs, sat_ids)
+            across_mars_latency, path, path_latencies = compute_across_mars_latency(constellation, times, latencies, inertial_pvs, sat_ids)
             print(f"Worst-case across-Mars latency: {across_mars_latency:.2f} seconds using {len(path)} satellites for constellation '{cfg.name}' ({i}).")
+
+            # Visualize the across-Mars path at the first timestep
+            # plot_across_mars_path( # Uncomment to enable plotting
+            #     constellation,
+            #     times,
+            #     inertial_pvs,
+            #     sat_ids,
+            #     path,
+            #     path_latencies,
+            #     mars_texture_path=None,
+            #     t_idx=0, # lazy just make sure this is the same as in compute_across_mars_latency
+            #     lat1=0.0,
+            #     lon1=0.0,
+            #     lat2=0.0,
+            #     lon2=180.0
+            # )
 
             # Need to compute age of clock and age of epheremis next
             # And approximate time-to-first-fix (TTFF) as well
@@ -257,7 +273,7 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
                                 
                                 # this just does for the first timestep for now
                                 # Should do for all timesteps and average but this is good enough for now
-                                across_mars_latency, path = compute_across_mars_latency(constellation, times, latencies, inertial_pvs, sat_ids)
+                                across_mars_latency, path, path_latencies = compute_across_mars_latency(constellation, times, latencies, inertial_pvs, sat_ids)
                     
                                 dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids) # compute self-DOP for each satellite
                                 warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details

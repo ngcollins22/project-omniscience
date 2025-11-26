@@ -422,10 +422,15 @@ def approximateOverHeadPassTime(altitude_km):
 
 def compute_across_mars_latency(
                                 constellation: Constellation, 
-                                times, 
+                                times: List[AbsoluteDate], 
                                 latencies: np.ndarray, 
                                 inertial_pvs: Dict[int, List], 
-                                sat_ids: List[int]) -> Tuple[float, List[int]]:
+                                sat_ids: List[int],
+                                t_idx: int = 0,
+                                lat1: float = 0.0, 
+                                lon1: float = 0.0, 
+                                lat2: float = 0.0, 
+                                lon2: float = 180.0) -> Tuple[float, List[int]]:
     """
         Compute worst-case surface-surface latency across Mars using the satellite constellation.
         Will use A* to find lowest-latency path between sats on opposite sides of Mars.
@@ -433,11 +438,7 @@ def compute_across_mars_latency(
         Path Cost: sum of latencies along edges
     """
 
-    t_idx = 0
-    # Choose a set of ground points on opposite sides of Mars
     mars_shape = constellation.mars_shape
-    lat1, lon1 = 0.0, 0.0
-    lat2, lon2 = 0.0, 180.0
 
     gp1 = GeodeticPoint(math.radians(lat1), math.radians(lon1), 0.0)
     gp2 = GeodeticPoint(math.radians(lat2), math.radians(lon2), 0.0)
@@ -562,6 +563,17 @@ def compute_across_mars_latency(
 
     total_latency = network_latency + tau_gp1_to_sat + tau_gp2_to_sat
 
-    return total_latency, path
+    # Edit: want to return all latencies along the path as well.
+    path_latencies = []
+    for i in range(len(path) - 1):
+        idx_a = sat_ids.index(path[i])
+        idx_b = sat_ids.index(path[i+1])
+        path_latencies.append(latencies[t_idx, idx_a, idx_b])
+
+    # pre and append ground-sat latencies
+    path_latencies.insert(0, tau_gp1_to_sat)
+    path_latencies.append(tau_gp2_to_sat)
+
+    return total_latency, path, path_latencies
 
     
