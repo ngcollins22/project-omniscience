@@ -3,11 +3,13 @@ from orekit.pyhelpers import setup_orekit_curdir
 from mars_constellation import Constellation, ConstellationConfig, build_constellation, propagate, compute_ground_tracks, compute_pdop_p95_map, constellation_meets_5sat_requirement, pdop_p95_requirement_met
 from typing import List
 from read_constellations import read_constellations, clean_path
-from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap
-from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateCost
+from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap, plot_across_mars_path
+from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateCost, compute_across_mars_latency
 import csv
 
 import numpy as np
+
+import argparse
 
 
 def generate_sat_configs_from_df(df) -> List[ConstellationConfig]:
@@ -42,7 +44,7 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
     
     with open('constellation_data.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
-                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient'
+                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'across_mars_latency', 'across_mars_num_sats_in_path'
                       ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -60,13 +62,13 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
             # --- compute ground tracks ---
             tracks = compute_ground_tracks(constellation, times, fixed_pvs)
             
-            basemap_path = "mars_1k_color.jpg"
-            plot_ground_tracks_on_basemap(
-                tracks,
-                basemap_path=basemap_path,
-                constellation=constellation,  # title auto-built from config
-                silent=True # writes to files instead of showing
-            )
+            basemap_path = "mars_viking_full.jpg"
+            # plot_ground_tracks_on_basemap(
+            #     tracks,
+            #     basemap_path=basemap_path,
+            #     constellation=constellation,  # title auto-built from config
+            #     silent=True # writes to files instead of showing
+            # )
 
             # --- compute PDOP/P95 map ---
             lat_vals, lon_vals, p95_pdop = compute_pdop_p95_map(
@@ -86,14 +88,14 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
             worst_pdop = p95_pdop.max()
             print(f"Worst-case PDOP P95 over lat +-45°: {worst_pdop:.2f} for constellation '{cfg.name}' ({i}). Meets PDOP ≤ 6 requirement: {meets_pdop_6_requirement}")
 
-            plot_pdop_p95_map_on_basemap(
-                lat_vals,
-                lon_vals,
-                p95_pdop,
-                basemap_path=basemap_path,
-                title=f"PDOP P95 for Constellation {i+1} (lat +-45°)",
-                silent=True # writes to files instead of showing
-            )
+            # plot_pdop_p95_map_on_basemap(
+            #     lat_vals,
+            #     lon_vals,
+            #     p95_pdop,
+            #     basemap_path=basemap_path,
+            #     title=f"PDOP P95 for Constellation {i+1} (lat +-45°)",
+            #     silent=True # writes to files instead of showing
+            # )
 
             # --- Connection Matrix and latencies ---
 
@@ -122,8 +124,24 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
             print(f"p95 Warm-Start Time Metric (not real time, proportional to real time) P95 over lat +-45°: {p95_warm_start_time_metric:.2f} seconds for constellation '{cfg.name}' ({i}).")
 
             # --- Compute worst-case latency from one side of mars to the other --- 
+            across_mars_latency, path, path_latencies = compute_across_mars_latency(constellation, times, latencies, inertial_pvs, sat_ids)
+            print(f"Worst-case across-Mars latency: {across_mars_latency:.2f} seconds using {len(path)} satellites for constellation '{cfg.name}' ({i}).")
 
-            # Can definetinly do more with the latency matrices here but ignoring that for now
+            # Visualize the across-Mars path at the first timestep
+            # plot_across_mars_path( # Uncomment to enable plotting
+            #     constellation,
+            #     times,
+            #     inertial_pvs,
+            #     sat_ids,
+            #     path,
+            #     path_latencies,
+            #     mars_texture_path=None,
+            #     t_idx=0, # lazy just make sure this is the same as in compute_across_mars_latency
+            #     lat1=0.0,
+            #     lon1=0.0,
+            #     lat2=0.0,
+            #     lon2=180.0
+            # )
 
             # Need to compute age of clock and age of epheremis next
             # And approximate time-to-first-fix (TTFF) as well
@@ -150,7 +168,9 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
                 'redundancy': av_redundancy,
                 'degree_per_node': av_degree_per_node,
                 'density_per_node': av_density_per_node,
-                'average_clustering_coefficient': av_average_clustering_coefficient
+                'average_clustering_coefficient': av_average_clustering_coefficient,
+                'across_mars_latency': across_mars_latency, 
+                'across_mars_num_sats_in_path': len(path)
             })
 
 def divisors(n: int) -> list[int]:
@@ -180,7 +200,7 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
 
     with open('constellation_data2.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
-                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost', 'mean_high_lat_P95_PDOP'
+                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost', 'mean_high_lat_P95_PDOP', 'across_mars_latency', 'across_mars_num_sats_in_path'
                       ]
 
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -247,6 +267,13 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
                                 av_degree_per_node = np.mean(degree_per_node)
                                 av_density_per_node = np.mean(density_per_node)
                                 av_average_clustering_coefficient = np.mean(average_clustering_coefficient)
+
+                                # Calculate surface-surface latency
+                                # Gonna use A* for this - will need latencies (the graph) and satellite positions for heuristic
+                                
+                                # this just does for the first timestep for now
+                                # Should do for all timesteps and average but this is good enough for now
+                                across_mars_latency, path, path_latencies = compute_across_mars_latency(constellation, times, latencies, inertial_pvs, sat_ids)
                     
                                 dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids) # compute self-DOP for each satellite
                                 warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details
@@ -275,7 +302,9 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
                                     'average_clustering_coefficient': av_average_clustering_coefficient, 
                                     'overhead_pass_time': overheadPassTime, 
                                     'cost': cost,
-                                    'mean_high_lat_P95_PDOP': meanHighLatPDOP})
+                                    'mean_high_lat_P95_PDOP': meanHighLatPDOP,
+                                    'across_mars_latency': across_mars_latency,
+                                    'across_mars_num_sats_in_path': len(path)})
         except KeyboardInterrupt:
             #I haven't tested this. use ctrl c at your own risk
             print("Interrupted — flushing csv writer.")
@@ -288,11 +317,23 @@ if __name__ == "__main__":
     ok.initVM()
     setup_orekit_curdir(from_pip_library=True)
 
-    #xlsx = clean_path(r"C:\Users\awt\Downloads\NewAHPandVSDlocal.xlsx")
-    #sheet = "Constellation Options"
-    #cell_range = "A3:G14"
+    xlsx = clean_path(r"C:\Users\natha\OneDrive - Virginia Tech\Tabor, Andrew's files - RASCAL_MarsPNT_1\AHP and VSD Spreadsheets for Project\NEW AHP and VSD.xlsx")
+    sheet = "Constellation Options"
+    cell_range = "A3:G14"
 
-    #run_analysis(xlsx, sheet, cell_range)
-    runSweepAnalysis()
+    # Argpase --sweep, --excel
+    parser = argparse.ArgumentParser(description="Run PNT VSD analysis.")
+    parser.add_argument("--sweep", action="store_true", help="Run sweep analysis")
+    parser.add_argument("--excel", action="store_true", help="Run Excel analysis")
+    args = parser.parse_args()
+
+    if args.excel:
+        run_analysis(xlsx, sheet, cell_range)
+    elif args.sweep:
+        runSweepAnalysis()
+    else:
+        print("Please specify either --sweep or --excel to run the desired analysis.")
+
+    
     
 

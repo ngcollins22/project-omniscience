@@ -38,8 +38,9 @@ class ConstellationConfig:
         return (f"ConstellationConfig(name={self.name}, inclination_deg={self.inclination_deg}, "
                 f"altitude_km={self.altitude_km}, total_sats={self.total_sats}, "
                 f"planes={self.planes}, phasing={self.phasing}, pattern={self.pattern})")
-
-
+    
+    def __str__(self):
+        return (f"{self.name}: Walker {self.pattern} {self.total_sats}/{self.planes}/{self.phasing} @ i={self.inclination_deg}°, h={self.altitude_km} km")
 @dataclass
 class Satellite:
     sat_id: int

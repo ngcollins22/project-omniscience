@@ -8,7 +8,7 @@ orekit.initVM()
 
 from java.io import File
 
-from org.orekit.bodies import CelestialBodyFactory
+from org.orekit.bodies import CelestialBodyFactory, GeodeticPoint
 from org.orekit.frames import Frame
 from org.orekit.orbits import KeplerianOrbit, PositionAngleType, WalkerConstellation
 from org.orekit.propagation.analytical import KeplerianPropagator
@@ -418,5 +418,162 @@ def approximateOverHeadPassTime(altitude_km):
     # Estimated pass duration
     T_pass = (2 * psi) / n
     return T_pass
+
+
+def compute_across_mars_latency(
+                                constellation: Constellation, 
+                                times: List[AbsoluteDate], 
+                                latencies: np.ndarray, 
+                                inertial_pvs: Dict[int, List], 
+                                sat_ids: List[int],
+                                t_idx: int = 0,
+                                lat1: float = 0.0, 
+                                lon1: float = 0.0, 
+                                lat2: float = 0.0, 
+                                lon2: float = 180.0) -> Tuple[float, List[int]]:
+    """
+        Compute worst-case surface-surface latency across Mars using the satellite constellation.
+        Will use A* to find lowest-latency path between sats on opposite sides of Mars.
+        Heuristic: straight-line distance / c
+        Path Cost: sum of latencies along edges
+    """
+
+    mars_shape = constellation.mars_shape
+
+    gp1 = GeodeticPoint(math.radians(lat1), math.radians(lon1), 0.0)
+    gp2 = GeodeticPoint(math.radians(lat2), math.radians(lon2), 0.0)
+
+    body = constellation.mars_fixed
+    inertial = constellation.mars_inertial
+    date = times[t_idx]
+
+    # Body-fixed -> inertial transform at this date
+    body_to_inertial = body.getTransformTo(inertial, date).toStaticTransform()
+
+    # Geodetic -> Cartesian in body-fixed frame
+    pos_gp1_body = mars_shape.transform(gp1)  # Vector3D in `body`
+    pos_gp2_body = mars_shape.transform(gp2)
+
+    # Body-fixed -> inertial
+    pos_gp1_inertial = body_to_inertial.transformPosition(pos_gp1_body)
+    pos_gp2_inertial = body_to_inertial.transformPosition(pos_gp2_body)
+
+    # Numpy vectors
+    r_gp1 = np.array([pos_gp1_inertial.getX(),
+                    pos_gp1_inertial.getY(),
+                    pos_gp1_inertial.getZ()])
+    r_gp2 = np.array([pos_gp2_inertial.getX(),
+                    pos_gp2_inertial.getY(),
+                    pos_gp2_inertial.getZ()])
+    # Find nearest satellite to each ground point
+    sat_idx_gp1 = None
+    sat_idx_gp2 = None
+    min_dist1 = float("inf")
+    min_dist2 = float("inf")
+    for sid in sat_ids:
+        pv_sat = inertial_pvs[sid][t_idx]
+        r_sat = np.array([pv_sat.getPosition().getX(),
+                          pv_sat.getPosition().getY(),
+                          pv_sat.getPosition().getZ()])
+        dist1 = np.linalg.norm(r_sat - r_gp1)
+        dist2 = np.linalg.norm(r_sat - r_gp2)
+        if dist1 < min_dist1:
+            min_dist1 = dist1
+            sat_idx_gp1 = sid
+        if dist2 < min_dist2:
+            min_dist2 = dist2
+            sat_idx_gp2 = sid
+
+    # Quickly calculate latency between ground point and nearest satellite
+    c = Constants.SPEED_OF_LIGHT
+    tau_gp1_to_sat = min_dist1 / c
+    tau_gp2_to_sat = min_dist2 / c
+
+    # We'll add those later on
+    
+    # Now we have two sats to connect via A*
+    """
+        Recall that the latency_tensor is (T, N, N) with NaN for no link.
+        We'll build a graph where each node is a satellite, and edges exist
+        where latency_tensor[t_idx, i, j] is finite, and the cost is that latency.
+    """
+
+    from queue import PriorityQueue
+
+    # forward def of heuristic for A*
+    # considered precomputing all heuristics here for simplicity, since we already know the goal sat, but that's actually less efficient in time and space
+    def heuristic(sat_a_idx, sat_b_idx):
+        # Straight-line distance between satellites / c
+        pv_a = inertial_pvs[sat_a_idx][t_idx]
+        pv_b = inertial_pvs[sat_b_idx][t_idx]
+        r_a = np.array([pv_a.getPosition().getX(),
+                        pv_a.getPosition().getY(),
+                        pv_a.getPosition().getZ()])
+        r_b = np.array([pv_b.getPosition().getX(),
+                        pv_b.getPosition().getY(),
+                        pv_b.getPosition().getZ()])
+        dist = np.linalg.norm(r_b - r_a)
+        return dist / c # seconds
+    
+    def reconstruct_path(came_from, current_sid):
+        total_path = [current_sid]
+        while current_sid in came_from:
+            current_sid = came_from[current_sid]
+            total_path.append(current_sid)
+        total_path.reverse()
+        return total_path
+    
+    # forward def of A*
+    def a_star(start_sid, goal_sid, k_t_idx=t_idx) -> Tuple[float, List[int]]:
+        open_set = PriorityQueue()
+        open_set.put((heuristic(start_sid, goal_sid), start_sid)) # (f_score, sat_id)
+
+        came_from = {}
+        g_score = {sid: float("inf") for sid in sat_ids}
+        g_score[start_sid] = 0.0
+
+        f_score = {sid: float("inf") for sid in sat_ids}
+        f_score[start_sid] = heuristic(start_sid, goal_sid)
+
+        while not open_set.empty():
+            current_f, current_sid = open_set.get()
+
+            if current_sid == goal_sid:
+                return g_score[goal_sid], reconstruct_path(came_from, current_sid)
+
+            current_idx = sat_ids.index(current_sid)
+
+            for neighbor_idx, tau in enumerate(latencies[t_idx, current_idx]):
+                if np.isnan(tau):
+                    continue  # no link
+
+                neighbor_sid = sat_ids[neighbor_idx]
+                tentative_g_score = g_score[current_sid] + tau
+
+                if tentative_g_score < g_score[neighbor_sid]:
+                    came_from[neighbor_sid] = current_sid
+                    g_score[neighbor_sid] = tentative_g_score
+                    f_score[neighbor_sid] = tentative_g_score + heuristic(neighbor_sid, goal_sid)
+                    open_set.put((f_score[neighbor_sid], neighbor_sid))
+
+
+        return float("inf"), []  # no path found
+    
+    network_latency, path = a_star(sat_idx_gp1, sat_idx_gp2)
+
+    total_latency = network_latency + tau_gp1_to_sat + tau_gp2_to_sat
+
+    # Edit: want to return all latencies along the path as well.
+    path_latencies = []
+    for i in range(len(path) - 1):
+        idx_a = sat_ids.index(path[i])
+        idx_b = sat_ids.index(path[i+1])
+        path_latencies.append(latencies[t_idx, idx_a, idx_b])
+
+    # pre and append ground-sat latencies
+    path_latencies.insert(0, tau_gp1_to_sat)
+    path_latencies.append(tau_gp2_to_sat)
+
+    return total_latency, path, path_latencies
 
     
