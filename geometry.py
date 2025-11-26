@@ -26,7 +26,7 @@ class MarsConstellationConfig:
     t: int                     # total satellites
     f: int                     # Walker phasing parameter
     altitude_km: float         # altitude above Mars mean radius
-    pattern: str = "DELTA"     # "DELTA" or "STAR" (only DELTA implemented heres)
+    pattern: str = "DELTA"     # "DELTA" or "STAR" (only DELTA implemented here)
 
 
 @dataclass
@@ -385,3 +385,10 @@ def compute_network_metrics(latency_tensor: np.ndarray) -> Tuple[float, float, f
         clustering_coeffs[i] = np.nanmean(clustering_coeffs_instant)
     
     return (number_of_links, redundancies, average_degrees, densities, clustering_coeffs)
+
+def calculateCost(planes, sats):
+    avgSatCost = 136400000
+    FH_LaunchCost = 150e6
+
+    return sats*avgSatCost + FH_LaunchCost*planes
+    
