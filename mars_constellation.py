@@ -228,9 +228,13 @@ def compute_pdop_p95_map(constellation,
     for k, date in enumerate(times):
         # For each grid point, compute PDOP at this date
         for (i_lat, j_lon), comp in dop_computers.items():
-            dop = comp.compute(date, gnss_list)
-            pdop = dop.getPdop()
+            try:
+                dop = comp.compute(date, gnss_list)
+                pdop = dop.getPdop()
             # If fewer than 4 visible sats, PDOP will be NaN; we keep NaN
+            except orekit.JavaError:
+                #singular geometry matrix
+                pdop = float('nan')
             pdop_series[i_lat, j_lon, k] = pdop
 
     # Now compute P95 along the time axis, ignoring NaNs
@@ -248,6 +252,80 @@ def compute_pdop_p95_map(constellation,
 
     return lat_vals, lon_vals, p95_pdop
 
+def pdop_p95_requirement_met(constellation,
+                             times,
+                             lat_min_deg=-45.0,
+                             lat_max_deg=45.0,
+                             lat_step_deg=5.0,
+                             lon_min_deg=-180.0,
+                             lon_max_deg=180.0,
+                             lon_step_deg=10.0,
+                             min_elev_deg=5.0,
+                             pdop_limit=6.0):
+    """
+    Fast early-exit PDOP P95 check.
+    Returns True if EVERY grid point has P95 PDOP <= pdop_limit.
+    Returns False immediately when a violation is detected.
+    """
+
+    mars_shape = constellation.mars_shape
+
+    # Build Java list of propagators once
+    gnss_list = ArrayList()
+    for sat in constellation.satellites:
+        gnss_list.add(sat.propagator)
+
+    lat_vals = np.arange(lat_min_deg, lat_max_deg + 1e-6, lat_step_deg)
+    lon_vals = np.arange(lon_min_deg, lon_max_deg + 1e-6, lon_step_deg)
+
+    min_elev_rad = math.radians(min_elev_deg)
+
+    #pre-create DOPComputers for each grid point
+    dop_computers = {}
+    pdop_records = {}   # store list of PDOP values for each point
+
+    for i_lat, lat_deg in enumerate(lat_vals):
+        lat_rad = math.radians(lat_deg)
+        for j_lon, lon_deg in enumerate(lon_vals):
+            lon_rad = math.radians(lon_deg)
+            gp = GeodeticPoint(lat_rad, lon_rad, 0.0)
+            comp = DOPComputer.create(mars_shape, gp).withMinElevation(min_elev_rad)
+            dop_computers[(i_lat, j_lon)] = comp
+            pdop_records[(i_lat, j_lon)] = []
+
+    # Time loop with early exit
+    for date in times:
+        for key, comp in dop_computers.items():
+
+            # catch singular-matrix cases
+            try:
+                dop = comp.compute(date, gnss_list)
+                pdop_val = dop.getPdop()
+            except orekit.JavaError:
+                pdop_val = float('nan')
+
+            if not math.isnan(pdop_val):
+                rec = pdop_records[key]
+                rec.append(pdop_val)
+
+                # Early check on P95 only when we have enough samples
+                n = len(rec)
+                if n >= 20:  # avoid unstable early percentiles
+                    sorted_vals = sorted(rec)
+                    idx95 = int(0.95 * (n - 1))
+                    if sorted_vals[idx95] > pdop_limit:
+                        return False  # EARLY EXIT
+
+    # Final pass over all grid points
+    for key, values in pdop_records.items():
+        if len(values) == 0:
+            return False  # no coverage → requirement fails
+
+        p95 = np.percentile(values, 95)
+        if p95 > pdop_limit:
+            return False
+
+    return True  # all good
 
 
 

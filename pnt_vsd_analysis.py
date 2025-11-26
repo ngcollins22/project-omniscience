@@ -1,10 +1,10 @@
 import orekit as ok
 from orekit.pyhelpers import setup_orekit_curdir
-from mars_constellation import Constellation, ConstellationConfig, build_constellation, propagate, compute_ground_tracks, compute_pdop_p95_map, constellation_meets_5sat_requirement
+from mars_constellation import Constellation, ConstellationConfig, build_constellation, propagate, compute_ground_tracks, compute_pdop_p95_map, constellation_meets_5sat_requirement, pdop_p95_requirement_met
 from typing import List
 from read_constellations import read_constellations, clean_path
 from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap
-from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics
+from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateCost
 import csv
 
 import numpy as np
@@ -162,119 +162,135 @@ def divisors(n: int) -> list[int]:
                 divs.append(n // i)
     return sorted(divs)
 
-def runSweepAnalysis(altRange = [6000, 7000], maxSats = 30):
+def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
     maxAlt = altRange[1]
     currAlt = altRange[0]
 
     duration_sec = 24 * 3600      # 24 hours
     step_sec = 300*6               # 30 min
 
-    with open('constellation_data3.csv', 'w', newline='') as csvfile:
+    # precompute possible planes so it isn't done every iteration
+    planes_by_sat_count = {}
+    for numSats in range(12, maxSats):
+        d = divisors(numSats)
+        d = [p for p in d if p != 1 and p <= 6]
+        if d:
+            planes_by_sat_count[numSats] = d
+    
+
+    with open('constellation_data2.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
-                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient'
+                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost', 'mean_high_lat_P95_PDOP'
                       ]
+
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
         writer.writeheader()            
 
-
-        # sweep through alitude band
         attemptCount = 0
         validCount = 0
-        for currAlt in range(altRange[0], altRange[1], 500):
-            #sweep through inclination band
-            for i in range(20, 65, 5):
-                for numSats in range (12,maxSats): # need to determine number of sats required to meet min5 req
-                    planes = divisors(numSats)
-                    planes.pop(0)
-                    
-                    #exclude more than 6 planes since GPS uses that many
-                    planes = [p for p in planes if p <= 6]
-
-
-                    if len(planes) == 0:
-                        continue
-                    
-                    for numPlanes in planes:
-                        for f in range(0, (numPlanes-1)):
-                            attemptCount = attemptCount+1
-                            print("attempt count: "+str(attemptCount)+", valid count: "+str(validCount)+" alt:" + str(currAlt) + " i:"+str(i)+" sats:" + str(numSats) + " planes:" + str(numPlanes) + " f:" + str(f))
-                            cfg = ConstellationConfig(
-                            name = str("c"+(str(attemptCount))),
-                            inclination_deg=float(i),
-                            total_sats=int(numSats),
-                            planes=int(numPlanes),
-                            phasing=int(f),
-                            altitude_km=float(currAlt),
-                            pattern=str('DELTA'))
-
-                            constellation = build_constellation(cfg)
-
-                            #check requirements
-                            if not constellation_meets_5sat_requirement(constellation):
-                                continue
-
-                            times, inertial_pvs, fixed_pvs = propagate(
-                            constellation,
-                            duration_sec=duration_sec,
-                            step_sec=step_sec)
-
-                            lat_vals, lon_vals, p95_pdop = compute_pdop_p95_map(constellation,
-                            times)
-                            meets_pdop_6_requirement = not (p95_pdop > 6).any()
-                            if not meets_pdop_6_requirement:
-                                continue
-                            validCount = validCount+1
-                            #if it reached this point, calculate everything
-                            worst_pdop = p95_pdop.max()
-                            latencies, sat_ids = compute_los_latency_tensor(inertial_pvs, body_radius_m=3389.5e3)  # Mars radius in meters
-
-                            # Calculate the network metrics
-                            number_of_links, redundancy, degree_per_node, density_per_node, average_clustering_coefficient = compute_network_metrics(latencies)
-                            # Average metrics over time
-                            av_number_of_links = np.mean(number_of_links)
-                            av_redundancy = np.mean(redundancy)
-                            av_degree_per_node = np.mean(degree_per_node)
-                            av_density_per_node = np.mean(density_per_node)
-                            av_average_clustering_coefficient = np.mean(average_clustering_coefficient)
-                
-                            dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids) # compute self-DOP for each satellite
-                            warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details
-                            #NEED COST METRIC
-                            #NEED NUMBER ADDITIONAL FOR GLOBAL COVERAGE
-                            #NEED OVERHEAD PASS TIME
-                            writer.writerow({
-                                'name': cfg.name,
-                                'inclination_deg': cfg.inclination_deg,
-                                'total_sats': cfg.total_sats,
-                                'planes': cfg.planes,
-                                'phasing': cfg.phasing,
-                                'altitude_km': cfg.altitude_km,
-                                'pattern': cfg.pattern, 
-                                'meets_pdop_6_requirement': meets_pdop_6_requirement,
-                                'p95_pdop': worst_pdop,
-                                'p95_warm_start_time_metric': p95_warm_start_time_metric,
-                                'number_of_nodes': len(sat_ids),
-                                'number_of_links': av_number_of_links,
-                                'redundancy': av_redundancy,
-                                'degree_per_node': av_degree_per_node,
-                                'density_per_node': av_density_per_node,
-                                'average_clustering_coefficient': av_average_clustering_coefficient
-                            })
-
+        # sweep through alitude band
+        try:
+            for currAlt in range(altRange[0], altRange[1], 500):
+                #sweep through inclination band
+                for i in range(20, 55, 5):
+                    for numSats in range (14,maxSats): # need to determine number of sats required to meet min5 req
+                        #get planes from precomputed list
+                        planes = planes_by_sat_count.get(numSats)
+                        if not planes:
+                            continue
                         
+                        for numPlanes in planes:
+                            for f in range(0, (numPlanes-1)):
+                                attemptCount = attemptCount+1
+                                if attemptCount % 250 == 0:
+                                    print(f"attempt: {attemptCount}, valid: {validCount}, alt:{currAlt} i:{i} sats:{numSats} planes:{numPlanes} f:{f}")
+                                cfg = ConstellationConfig(
+                                name = str("c"+(str(attemptCount))),
+                                inclination_deg=float(i),
+                                total_sats=int(numSats),
+                                planes=int(numPlanes),
+                                phasing=int(f),
+                                altitude_km=float(currAlt),
+                                pattern=str('DELTA'))
+
+                                constellation = build_constellation(cfg)
+
+                                #check requirements
+                                if not constellation_meets_5sat_requirement(constellation):
+                                    continue
+
+                                times, inertial_pvs, fixed_pvs = propagate(
+                                constellation,
+                                duration_sec=duration_sec,
+                                step_sec=step_sec)
+                                
+                                #meets_pdop_6_requirement = not (p95_pdop > 6).any() # OLD
+
+                                # calls a more efficent PDOP check that exits as soon as it fails
+                                meets_pdop_6_requirement = pdop_p95_requirement_met(constellation, times)
+                                if not meets_pdop_6_requirement:
+                                    continue
+                                validCount = validCount+1
+
+                                lat_vals, lon_vals, p95_pdop = compute_pdop_p95_map(constellation,
+                                times)
+                                #if it reached this point, calculate everything
+                                worst_pdop = p95_pdop.max()
+                                latencies, sat_ids = compute_los_latency_tensor(inertial_pvs, body_radius_m=3389.5e3)  # Mars radius in meters
+
+                                # Calculate the network metrics
+                                number_of_links, redundancy, degree_per_node, density_per_node, average_clustering_coefficient = compute_network_metrics(latencies)
+                                # Average metrics over time
+                                av_number_of_links = np.mean(number_of_links)
+                                av_redundancy = np.mean(redundancy)
+                                av_degree_per_node = np.mean(degree_per_node)
+                                av_density_per_node = np.mean(density_per_node)
+                                av_average_clustering_coefficient = np.mean(average_clustering_coefficient)
+                    
+                                dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids) # compute self-DOP for each satellite
+                                warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details
+                                overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
+                                cost = calculateCost(cfg.planes, cfg.total_sats)
+                                _, _, highLatP95PDOP = compute_pdop_p95_map(constellation, times, 45.0, 89.0)
+                                meanHighLatPDOP = np.nanmean(highLatP95PDOP)
 
 
-
+                                writer.writerow({
+                                    'name': cfg.name,
+                                    'inclination_deg': cfg.inclination_deg,
+                                    'total_sats': cfg.total_sats,
+                                    'planes': cfg.planes,
+                                    'phasing': cfg.phasing,
+                                    'altitude_km': cfg.altitude_km,
+                                    'pattern': cfg.pattern, 
+                                    'meets_pdop_6_requirement': meets_pdop_6_requirement,
+                                    'p95_pdop': worst_pdop,
+                                    'p95_warm_start_time_metric': p95_warm_start_time_metric,
+                                    'number_of_nodes': len(sat_ids),
+                                    'number_of_links': av_number_of_links,
+                                    'redundancy': av_redundancy,
+                                    'degree_per_node': av_degree_per_node,
+                                    'density_per_node': av_density_per_node,
+                                    'average_clustering_coefficient': av_average_clustering_coefficient, 
+                                    'overhead_pass_time': overheadPassTime, 
+                                    'cost': cost,
+                                    'mean_high_lat_P95_PDOP': meanHighLatPDOP})
+        except KeyboardInterrupt:
+            #I haven't tested this. use ctrl c at your own risk
+            print("Interrupted — flushing csv writer.")
+            csvfile.flush()
+            csvfile.close()
+                    
 
 
 if __name__ == "__main__":
     ok.initVM()
     setup_orekit_curdir(from_pip_library=True)
 
-    xlsx = clean_path(r"C:\Users\awt\Downloads\NewAHPandVSDlocal.xlsx")
-    sheet = "Constellation Options"
-    cell_range = "A3:G14"
+    #xlsx = clean_path(r"C:\Users\awt\Downloads\NewAHPandVSDlocal.xlsx")
+    #sheet = "Constellation Options"
+    #cell_range = "A3:G14"
 
     #run_analysis(xlsx, sheet, cell_range)
     runSweepAnalysis()
