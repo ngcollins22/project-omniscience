@@ -4,7 +4,7 @@ from mars_constellation import Constellation, ConstellationConfig, build_constel
 from typing import List
 from read_constellations import read_constellations, clean_path
 from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap
-from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateCost
+from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateCost, compute_across_mars_latency
 import csv
 
 import numpy as np
@@ -180,7 +180,7 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
 
     with open('constellation_data2.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
-                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost', 'mean_high_lat_P95_PDOP'
+                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost', 'mean_high_lat_P95_PDOP', 'across_mars_latency', 'across_mars_num_sats_in_path'
                       ]
 
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -247,6 +247,13 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
                                 av_degree_per_node = np.mean(degree_per_node)
                                 av_density_per_node = np.mean(density_per_node)
                                 av_average_clustering_coefficient = np.mean(average_clustering_coefficient)
+
+                                # Calculate surface-surface latency
+                                # Gonna use A* for this - will need latencies (the graph) and satellite positions for heuristic
+                                
+                                # this just does for the first timestep for now
+                                # Should do for all timesteps and average but this is good enough for now
+                                across_mars_latency, path = compute_across_mars_latency(constellation, times, latencies, inertial_pvs, sat_ids)
                     
                                 dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids) # compute self-DOP for each satellite
                                 warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details
@@ -275,7 +282,9 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
                                     'average_clustering_coefficient': av_average_clustering_coefficient, 
                                     'overhead_pass_time': overheadPassTime, 
                                     'cost': cost,
-                                    'mean_high_lat_P95_PDOP': meanHighLatPDOP})
+                                    'mean_high_lat_P95_PDOP': meanHighLatPDOP,
+                                    'across_mars_latency': across_mars_latency,
+                                    'across_mars_num_sats_in_path': len(path)})
         except KeyboardInterrupt:
             #I haven't tested this. use ctrl c at your own risk
             print("Interrupted — flushing csv writer.")
