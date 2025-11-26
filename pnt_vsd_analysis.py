@@ -4,7 +4,7 @@ from mars_constellation import Constellation, ConstellationConfig, build_constel
 from typing import List
 from read_constellations import read_constellations, clean_path
 from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap
-from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics
+from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, calculateCost, approximateOverHeadPassTime
 import csv
 
 import numpy as np
@@ -42,7 +42,7 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
     
     with open('constellation_data.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
-                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient'
+                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost'
                       ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -162,6 +162,7 @@ def divisors(n: int) -> list[int]:
                 divs.append(n // i)
     return sorted(divs)
 
+
 def runSweepAnalysis(altRange = [6000, 7000], maxSats = 30):
     maxAlt = altRange[1]
     currAlt = altRange[0]
@@ -240,7 +241,8 @@ def runSweepAnalysis(altRange = [6000, 7000], maxSats = 30):
                 
                             dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids) # compute self-DOP for each satellite
                             warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details
-                            #NEED COST METRIC
+                            overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
+                            cost = calculateCost(cfg.planes, cfg.total_sats)
                             #NEED NUMBER ADDITIONAL FOR GLOBAL COVERAGE
                             #NEED OVERHEAD PASS TIME
                             writer.writerow({
@@ -259,7 +261,9 @@ def runSweepAnalysis(altRange = [6000, 7000], maxSats = 30):
                                 'redundancy': av_redundancy,
                                 'degree_per_node': av_degree_per_node,
                                 'density_per_node': av_density_per_node,
-                                'average_clustering_coefficient': av_average_clustering_coefficient
+                                'average_clustering_coefficient': av_average_clustering_coefficient, 
+                                'overhead_pass_time': overheadPassTime, 
+                                'cost': cost
                             })
 
                         

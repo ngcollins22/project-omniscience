@@ -391,4 +391,32 @@ def calculateCost(planes, sats):
     FH_LaunchCost = 150e6
 
     return sats*avgSatCost + FH_LaunchCost*planes
+
+import math
+
+def approximateOverHeadPassTime(altitude_km):
+    altitude = altitude*1000
+    elev_mask_deg=10
+    mu = 4.2828e13
+    # Convert elevation to radians
+    e = math.radians(elev_mask_deg)
+
+    # Orbit radius
+    R_MARS = 3389_500.0e3
+    r = R_MARS + altitude
+
+    # Central angle visible above the elevation mask
+    cos_psi = (R_MARS / r) * math.cos(e)
+    # Numerical safety clamp
+    cos_psi = max(min(cos_psi, 1.0), -1.0)
+
+    psi = math.acos(cos_psi)   # radians
+
+    # Mean motion (rad/s)
+    n = math.sqrt(mu / r**3)
+
+    # Estimated pass duration
+    T_pass = (2 * psi) / n
+    return T_pass
+
     
