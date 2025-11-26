@@ -26,7 +26,7 @@ class MarsConstellationConfig:
     t: int                     # total satellites
     f: int                     # Walker phasing parameter
     altitude_km: float         # altitude above Mars mean radius
-    pattern: str = "DELTA"     # "DELTA" or "STAR" (only DELTA implemented heres)
+    pattern: str = "DELTA"     # "DELTA" or "STAR" (only DELTA implemented here)
 
 
 @dataclass
