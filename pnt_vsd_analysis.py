@@ -42,7 +42,7 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
     
     with open('constellation_data.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
-                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost'
+                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient'
                       ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -172,7 +172,7 @@ def runSweepAnalysis(altRange = [6000, 7000], maxSats = 30):
 
     with open('constellation_data3.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
-                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient'
+                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost', 'mean_high_lat_P95_PDOP'
                       ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -243,8 +243,8 @@ def runSweepAnalysis(altRange = [6000, 7000], maxSats = 30):
                             warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details
                             overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
                             cost = calculateCost(cfg.planes, cfg.total_sats)
-                            #NEED NUMBER ADDITIONAL FOR GLOBAL COVERAGE
-                            #NEED OVERHEAD PASS TIME
+                            _, _, highLatP95PDOP = compute_pdop_p95_map(constellation, times, 45.0, 90.0)
+                            meanHighLatPDOP = np.nanmean(highLatP95PDOP)
                             writer.writerow({
                                 'name': cfg.name,
                                 'inclination_deg': cfg.inclination_deg,
@@ -263,7 +263,8 @@ def runSweepAnalysis(altRange = [6000, 7000], maxSats = 30):
                                 'density_per_node': av_density_per_node,
                                 'average_clustering_coefficient': av_average_clustering_coefficient, 
                                 'overhead_pass_time': overheadPassTime, 
-                                'cost': cost
+                                'cost': cost,
+                                'mean_high_lat_P95_PDOP': meanHighLatPDOP 
                             })
 
                         
