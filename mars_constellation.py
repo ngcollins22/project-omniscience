@@ -196,30 +196,30 @@ def divisors(n: int) -> list[int]:
                 divs.append(n // i)
     return sorted(divs)
 
-def findMinSatsForGlobal(originalConstellation: Constellation, maxSats = 21, i = 75)-> Tuple[int, ConstellationConfig]:
+def findMinSatsForGlobal(originalConstellation: Constellation, times: List[AbsoluteDate],planes_by_sat_count, maxSats = 21, i = 75)-> Tuple[int, ConstellationConfig]:
     #returns minimum number of additional satellites for global and the working constellation
-    duration_sec = 24 * 3600      # 24 hours
-    step_sec = 300*6               # 30 min
-    alt = originalConstellation.config.altitude_km
-    times, inertial_pvs, fixed_pvs = propagate(
-                                originalConstellation,
-                                duration_sec=duration_sec,
-                                step_sec=step_sec)
+    #duration_sec = 24 * 3600      # 24 hours
+    #step_sec = 300*6               # 30 min
+    #alt = originalConstellation.config.altitude_km
+    #times, inertial_pvs, fixed_pvs = propagate(
+    #                            originalConstellation,
+    #                            duration_sec=duration_sec,
+    #                            step_sec=step_sec)
     #check no additional sats
-    if constellation_meets_5sat_requirement(originalConstellation, AbsoluteDate(2025, 1, 1, 0, 0, 0.0, TimeScalesFactory.getUTC()), 45.0, 90.0,) and pdop_p95_requirement_met(originalConstellation, times, 45, 90):
+    if constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=45.0, lat_max_deg=90.0,) and pdop_p95_requirement_met(originalConstellation, times, 45, 90):
         return 0, None
     
     # precompute possible planes so it isn't done every iteration
-    planes_by_sat_count = {}
-    for numSats in range(1, maxSats+1):
-        d = divisors(numSats)
-        d = [p for p in d if p <= 4] #limiting to four planes
-        if d:
-            planes_by_sat_count[numSats] = d
+    #planes_by_sat_count = {}
+    #for numSats in range(1, maxSats+1):
+    #    d = divisors(numSats)
+    #    d = [p for p in d if p <= 4] #limiting to four planes
+    #    if d:
+    #        planes_by_sat_count[numSats] = d
 
     attemptCount = 0
     #generate range of sat numbers, didn't include 1 cus asymetry
-    Trange = range(4, maxSats+1)
+    Trange = range(3, maxSats+1)
     for T in Trange:
         #get precomputed planes
         planes = planes_by_sat_count.get(T)
@@ -239,16 +239,16 @@ def findMinSatsForGlobal(originalConstellation: Constellation, maxSats = 21, i =
                                 total_sats=int(T),
                                 planes=int(numPlanes),
                                 phasing=int(f),
-                                altitude_km=float(alt),
+                                altitude_km=float(originalConstellation.config.altitude_km),
                                 pattern=str('DELTA'))
 
                 doubleConstellation = addConstellation(additionalcfg, originalConstellation)
-                times, _, _ = propagate(
-                                doubleConstellation,
-                                duration_sec=duration_sec,
-                                step_sec=step_sec)
-                if constellation_meets_5sat_requirement(doubleConstellation, AbsoluteDate(2025, 1, 1, 0, 0, 0.0, TimeScalesFactory.getUTC()), 45.0, 89.0,) and pdop_p95_requirement_met(doubleConstellation, times, 45, 89):      
-                    print(str(T)+"/"+str(numPlanes)+"/"+str(f))
+                #times, _, _ = propagate(
+                #                doubleConstellation,
+                #                duration_sec=duration_sec,
+                #                step_sec=step_sec)
+                if constellation_meets_5sat_requirement(doubleConstellation, lat_min_deg=45.0, lat_max_deg=90.0,) and pdop_p95_requirement_met(doubleConstellation, times, 45, 89):      
+                    #print(str(T)+"/"+str(numPlanes)+"/"+str(f))
                     return T, additionalcfg
     #if it fails to find something
     return -1, None
@@ -443,7 +443,7 @@ def pdop_p95_requirement_met(constellation,
     # Final pass over all grid points
     for key, values in pdop_records.items():
         if len(values) == 0:
-            return False  # no coverage → requirement fails
+            return False  # no coverage requirement fails
 
         p95 = np.percentile(values, 95)
         if p95 > pdop_limit:
@@ -464,7 +464,7 @@ def constellation_meets_5sat_requirement(
     lon_step_deg: float = 10.0,
     min_elev_deg: float = 10.0,
     min_sats_in_view: int = 5,
-    time_step_sec: float = 300.0,  # sample every 5 minutes
+    time_step_sec: float = 18000.0,  # sample every 30 minutes
 ) -> bool:
     """
     Check if a constellation provides at least `min_sats_in_view` satellites

@@ -174,7 +174,7 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
             })
 
 
-def runSweepAnalysis(altRange = [8000, 21000], maxSats = 25):
+def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
     starttime = time.time()
     maxAlt = altRange[1]
     currAlt = altRange[0]
@@ -184,7 +184,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSats = 25):
 
     # precompute possible planes so it isn't done every iteration
     planes_by_sat_count = {}
-    for numSats in range(12, maxSats):
+    for numSats in range(12, maxSatsInput):
         d = divisors(numSats)
         d = [p for p in d if p != 1 and p <= 6]
         if d:
@@ -205,8 +205,14 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSats = 25):
         # sweep through alitude band
         for currAlt in range(altRange[0], altRange[1], 500):
             #sweep through inclination band
-            for i in range(15, 60, 5):
-                for numSats in range (14,maxSats+1): # need to determine number of sats required to meet min5 req
+            if currAlt < 14000:
+                minSats = 16
+                maxSats = maxSatsInput
+            else:
+                minsats = 14
+                maxSats = 22
+            for i in range(20, 60, 5):
+                for numSats in range (minSats,maxSats+1): # need to determine number of sats required to meet min5 req
                     #get planes from precomputed list
                     planes = planes_by_sat_count.get(numSats)
                     if not planes:
@@ -215,7 +221,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSats = 25):
                     for numPlanes in planes:
                         for f in range(0, (numPlanes)):
                             attemptCount = attemptCount+1
-                            if attemptCount % 20 == 0:
+                            if attemptCount % 100 == 0:
                                 print(f"attempt: {attemptCount}, valid: {validCount}, alt:{currAlt} i:{i} sats:{numSats} planes:{numPlanes} f:{f}")
                             cfg = ConstellationConfig(
                             name = str("c"+(str(attemptCount))),
@@ -228,8 +234,8 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSats = 25):
 
                             constellation = build_constellation(cfg)
 
-                            #check requirements
-                            if not constellation_meets_5sat_requirement(constellation):
+                            #check requirements (only checking one hemisphere for efficiency)
+                            if not constellation_meets_5sat_requirement(constellation, lat_min_deg=0, lat_max_deg=45):
                                 continue
 
                             times, inertial_pvs, fixed_pvs = propagate(
@@ -239,16 +245,21 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSats = 25):
                             
                             #meets_pdop_6_requirement = not (p95_pdop > 6).any() # OLD
 
-                            # calls a more efficent PDOP check that exits as soon as it fails
+                            # calls a more efficent PDOP check that exits as soon as it fails. check only northern hemisphere for efficiency,
+                            # when worst case PDOP is calculated, we check everywhere
                             meets_pdop_6_requirement = pdop_p95_requirement_met(constellation, times)
                             if not meets_pdop_6_requirement:
                                 continue
                             validCount = validCount+1
-
-                            lat_vals, lon_vals, p95_pdop = compute_pdop_p95_map(constellation,
-                            times)
                             #if it reached this point, calculate everything
+
+                            _, _, p95_pdop = compute_pdop_p95_map(constellation,
+                            times)
+                            
                             worst_pdop = p95_pdop.max()
+                            #double check meets pdop requirement
+                            if worst_pdop > 6:
+                                continue
                             latencies, sat_ids = compute_los_latency_tensor(inertial_pvs, body_radius_m=3389.5e3)  # Mars radius in meters
 
                             # Calculate the network metrics
@@ -279,16 +290,17 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSats = 25):
                             #sweep satelites first 0-21 in increasing order, all planes 1-4 planes( this excludes ), i = 75, all f, exit at earlist solution
                             #return number of additional sats, and the constellation that worked
 
-                            minSatsForGlobal, c2 = findMinSatsForGlobal(constellation)
-                            upgradeCost = calculateCost(c2.planes, c2.total_sats)
+                            minSatsForGlobal, c2 = findMinSatsForGlobal(constellation, times, planes_by_sat_count)
+                        
 
                             if c2:
                                 additionalConstString = str(c2.total_sats)+"/"+str(c2.planes)+"/"+str(c2.phasing)+" alt="+str(c2.altitude_km)+ " i="+str(c2.inclination_deg)
+                                upgradeCost = calculateCost(c2.planes, c2.total_sats)
+
                             else:
                                 additionalConstString = "None"
+                                upgradeCost=0
                             
-                            print(f"alt:{currAlt} i:{i} {numSats}/{numPlanes}/{f} 2nd:{c2.total_sats}/{c2.planes}/{c2.phasing}")
-
                             writer.writerow({
                                 'name': cfg.name,
                                 'inclination_deg': cfg.inclination_deg,
