@@ -108,6 +108,62 @@ def build_constellation(config: ConstellationConfig) -> Constellation:
         mars_shape=mars_shape
     )
 
+
+
+def addConstellation(secondConfig: ConstellationConfig, originalConst: Constellation) -> Constellation:
+    utc = TimeScalesFactory.getUTC()
+    epoch = AbsoluteDate(2025, 1, 1, 0, 0, 0.0, utc)
+
+    mars = CelestialBodyFactory.getMars()
+    mu = mars.getGM()
+    inertial = mars.getInertiallyOrientedFrame()
+    fixed = mars.getBodyOrientedFrame()
+
+    # Mars ellipsoid (IAU value)
+    R_mars = 3394200.0  # meters
+    f_mars = 0.00589
+    mars_shape = OneAxisEllipsoid(R_mars, f_mars, fixed)
+
+    # Reference orbit
+    a = R_mars + secondConfig.altitude_km * 1e3
+    e = 0.0
+    i = math.radians(secondConfig.inclination_deg)
+    omega = 0.0
+    raan0 = 0.0
+    M0 = 0.0
+
+    ref_orbit = KeplerianOrbit(a, e, i, omega, raan0, M0,
+                                PositionAngleType.MEAN,
+                                inertial, epoch, mu)
+
+    # Walker constellation
+    walker = WalkerConstellation(secondConfig.total_sats, secondConfig.planes, secondConfig.phasing)
+    slot_matrix = walker.buildRegularSlots(ref_orbit)
+
+    satellites = list(originalConst.satellites)  # copy list
+    if satellites:
+        sat_id = max(s.sat_id for s in satellites) + 1
+    else:
+        sat_id = 0
+
+    for p in range(slot_matrix.size()):
+        plane_slots = JavaList.cast_(slot_matrix.get(p))
+        for s in range(plane_slots.size()):
+            slot = WalkerConstellationSlot.cast_(plane_slots.get(s))
+            orbit = slot.getOrbit()
+            prop = KeplerianPropagator(orbit)
+            satellites.append(Satellite(sat_id, p, s, prop))
+            sat_id += 1
+
+    return Constellation(
+        config=secondConfig,
+        epoch=epoch,
+        satellites=satellites,
+        mars_inertial=inertial,
+        mars_fixed=fixed,
+        mars_shape=mars_shape
+    )
+
 def propagate(constellation: Constellation,
               duration_sec: float,
               step_sec: float
@@ -130,6 +186,73 @@ def propagate(constellation: Constellation,
 
     return times, inertial_pvs, fixed_pvs
 
+
+def divisors(n: int) -> list[int]:
+    divs = []
+    for i in range(1, int(n**0.5) + 1):
+        if n % i == 0:
+            divs.append(i)
+            if i != n // i:
+                divs.append(n // i)
+    return sorted(divs)
+
+def findMinSatsForGlobal(originalConstellation: Constellation, maxSats = 21, i = 75)-> Tuple[int, ConstellationConfig]:
+    #returns minimum number of additional satellites for global and the working constellation
+    duration_sec = 24 * 3600      # 24 hours
+    step_sec = 300*6               # 30 min
+    alt = originalConstellation.config.altitude_km
+    times, inertial_pvs, fixed_pvs = propagate(
+                                originalConstellation,
+                                duration_sec=duration_sec,
+                                step_sec=step_sec)
+    #check no additional sats
+    if constellation_meets_5sat_requirement(originalConstellation, AbsoluteDate(2025, 1, 1, 0, 0, 0.0, TimeScalesFactory.getUTC()), 45.0, 90.0,) and pdop_p95_requirement_met(originalConstellation, times, 45, 90):
+        return 0, None
+    
+    # precompute possible planes so it isn't done every iteration
+    planes_by_sat_count = {}
+    for numSats in range(1, maxSats+1):
+        d = divisors(numSats)
+        d = [p for p in d if p <= 4] #limiting to four planes
+        if d:
+            planes_by_sat_count[numSats] = d
+
+    attemptCount = 0
+    #generate range of sat numbers, didn't include 1 cus asymetry
+    Trange = range(4, maxSats+1)
+    for T in Trange:
+        #get precomputed planes
+        planes = planes_by_sat_count.get(T)
+        if not planes:
+            continue
+        for numPlanes in planes:
+            #if only 1 plane, i = 90 
+            if numPlanes ==1:
+                curr_i = 90
+            else:
+                curr_i = i
+            for f in range(0, (numPlanes)):
+                attemptCount = attemptCount+1
+                additionalcfg = ConstellationConfig(
+                                name = str("c2nd"+(str(attemptCount))),
+                                inclination_deg=float(curr_i),
+                                total_sats=int(T),
+                                planes=int(numPlanes),
+                                phasing=int(f),
+                                altitude_km=float(alt),
+                                pattern=str('DELTA'))
+
+                doubleConstellation = addConstellation(additionalcfg, originalConstellation)
+                times, _, _ = propagate(
+                                doubleConstellation,
+                                duration_sec=duration_sec,
+                                step_sec=step_sec)
+                if constellation_meets_5sat_requirement(doubleConstellation, AbsoluteDate(2025, 1, 1, 0, 0, 0.0, TimeScalesFactory.getUTC()), 45.0, 89.0,) and pdop_p95_requirement_met(doubleConstellation, times, 45, 89):      
+                    print(str(T)+"/"+str(numPlanes)+"/"+str(f))
+                    return T, additionalcfg
+    #if it fails to find something
+    return -1, None
+        
 def compute_ground_tracks(constellation,
                           times,  # List[AbsoluteDate]
                           fixed_pvs: Dict[int, List[PVCoordinates]]):
