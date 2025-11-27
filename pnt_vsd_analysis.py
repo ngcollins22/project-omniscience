@@ -184,14 +184,14 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
 
     # precompute possible planes so it isn't done every iteration
     planes_by_sat_count = {}
-    for numSats in range(12, maxSatsInput):
+    for numSats in range(1, maxSatsInput):
         d = divisors(numSats)
         d = [p for p in d if p != 1 and p <= 6]
         if d:
             planes_by_sat_count[numSats] = d
     
 
-    with open('constellation_data2.csv', 'w', newline='') as csvfile:
+    with open('constellation_data_sweep.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
                       'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost', 'across_mars_latency', 'across_mars_num_sats_in_path', 
                        'min_sats_for_global', 'additional_constellation', 'upgrade_cost'
@@ -329,6 +329,230 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
     elapsedTime = (endtime-starttime)/60
     print("Execution time: "+str(elapsedTime)+" minutes")
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
+
+_worker_orekit_initialized = False
+
+def _init_orekit_in_worker():
+    """Ensure Orekit JVM is initialized in this worker process."""
+    global _worker_orekit_initialized
+    if not _worker_orekit_initialized:
+        ok.initVM()
+        setup_orekit_curdir(from_pip_library=True)
+        _worker_orekit_initialized = True
+
+
+def _evaluate_constellation_task(task):
+    """
+    Worker function run in parallel processes.
+
+    task is a dict with:
+        alt, inc, numSats, numPlanes, f, duration_sec, step_sec, planes_by_sat_count
+        and a unique attempt_id
+    Returns either:
+        result_dict (for CSV), or
+        None if constellation fails filters
+    """
+    _init_orekit_in_worker()
+
+    alt = task["alt"]
+    inc = task["inc"]
+    numSats = task["numSats"]
+    numPlanes = task["numPlanes"]
+    f = task["f"]
+    duration_sec = task["duration_sec"]
+    step_sec = task["step_sec"]
+    attempt_id = task["attempt_id"]
+    planes_by_sat_count = task["planes_by_sat_count"]
+
+    cfg = ConstellationConfig(
+        name=f"c{attempt_id}",
+        inclination_deg=float(inc),
+        total_sats=int(numSats),
+        planes=int(numPlanes),
+        phasing=int(f),
+        altitude_km=float(alt),
+        pattern='DELTA'
+    )
+
+    # Build constellation
+    constellation = build_constellation(cfg)
+
+    # Requirement 1: 5-sat coverage in 
+    if not constellation_meets_5sat_requirement(constellation):
+        return None
+
+    # Propagate full day
+    times, inertial_pvs, fixed_pvs = propagate(
+        constellation,
+        duration_sec=duration_sec,
+        step_sec=step_sec
+    )
+
+    # Requirement 2: PDOP < 6 everywhere (early-exit checker)
+    meets_pdop_6_requirement = pdop_p95_requirement_met(constellation, times)
+    if not meets_pdop_6_requirement:
+        return None
+
+    # Full PDOP field
+    _, _, p95_pdop = compute_pdop_p95_map(constellation, times)
+    worst_pdop = p95_pdop.max()
+    if worst_pdop > 6: #double check since original is lower fidelity
+        return None
+
+    # Link-level metrics
+    latencies, sat_ids = compute_los_latency_tensor(inertial_pvs, body_radius_m=3389.5e3)
+
+    number_of_links, redundancy, degree_per_node, density_per_node, average_clustering_coefficient = compute_network_metrics(latencies)
+    av_number_of_links = np.mean(number_of_links)
+    av_redundancy = np.mean(redundancy)
+    av_degree_per_node = np.mean(degree_per_node)
+    av_density_per_node = np.mean(density_per_node)
+    av_average_clustering_coefficient = np.mean(average_clustering_coefficient)
+
+    across_mars_latency, path, path_latencies = compute_across_mars_latency(
+        constellation, times, latencies, inertial_pvs, sat_ids
+    )
+
+    dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids)
+    warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self)
+
+    overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
+    cost = calculateCost(cfg.planes, cfg.total_sats)
+
+    # Extra constellation for global coverage (using same planes_by_sat_count and times)
+    minSatsForGlobal, c2 = findMinSatsForGlobal(constellation, times, planes_by_sat_count)
+
+    if c2:
+        additionalConstString = f"{c2.total_sats}/{c2.planes}/{c2.phasing} alt={c2.altitude_km} i={c2.inclination_deg}"
+        upgradeCost = calculateCost(c2.planes, c2.total_sats)
+    else:
+        additionalConstString = "None"
+        upgradeCost = 0
+
+    # Return a row dict ready for csv.DictWriter
+    return {
+        'name': cfg.name,
+        'inclination_deg': cfg.inclination_deg,
+        'total_sats': cfg.total_sats,
+        'planes': cfg.planes,
+        'phasing': cfg.phasing,
+        'altitude_km': cfg.altitude_km,
+        'pattern': cfg.pattern,
+        'meets_pdop_6_requirement': meets_pdop_6_requirement,
+        'p95_pdop': worst_pdop,
+        'p95_warm_start_time_metric': p95_warm_start_time_metric,
+        'number_of_nodes': len(sat_ids),
+        'number_of_links': av_number_of_links,
+        'redundancy': av_redundancy,
+        'degree_per_node': av_degree_per_node,
+        'density_per_node': av_density_per_node,
+        'average_clustering_coefficient': av_average_clustering_coefficient,
+        'overhead_pass_time': overheadPassTime,
+        'cost': cost,
+        'across_mars_latency': across_mars_latency,
+        'across_mars_num_sats_in_path': len(path),
+        'min_sats_for_global': minSatsForGlobal,
+        'additional_constellation': additionalConstString,
+        'upgrade_cost': upgradeCost,
+    }
+
+def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_workers=10):
+    starttime = time.time()
+
+    duration_sec = 24 * 3600      # 24 hours
+    step_sec = 300 * 6            # 30 min
+
+    # Precompute possible planes so it isn't done every iteration
+    planes_by_sat_count = {}
+    for numSats in range(1, maxSatsInput):
+        d = divisors(numSats)
+        d = [p for p in d if p != 1 and p <= 6]
+        if d:
+            planes_by_sat_count[numSats] = d
+
+    # Build list of all tasks (configurations) to evaluate
+    tasks = []
+    attemptCount = 0
+
+    for currAlt in range(altRange[0], altRange[1], 500):
+        if currAlt < 14000:
+            minSats = 16
+            maxSats = maxSatsInput
+        else:
+            minSats = 14
+            maxSats = 22
+
+        for inc in range(20, 60, 5):
+            for numSats in range(minSats, maxSats + 1):
+                planes = planes_by_sat_count.get(numSats)
+                if not planes:
+                    continue
+
+                for numPlanes in planes:
+                    for f in range(numPlanes):
+                        attemptCount += 1
+                        task = {
+                            "attempt_id": attemptCount,
+                            "alt": currAlt,
+                            "inc": inc,
+                            "numSats": numSats,
+                            "numPlanes": numPlanes,
+                            "f": f,
+                            "duration_sec": duration_sec,
+                            "step_sec": step_sec,
+                            "planes_by_sat_count": planes_by_sat_count,
+                        }
+                        tasks.append(task)
+
+    print(f"Total configurations to evaluate: {len(tasks)}")
+
+    # Run tasks in parallel and write results as they complete
+    with open('constellation_data_parallel2.csv', 'w', newline='') as csvfile:
+        fieldnames = [
+            'name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km',
+            'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric',
+            'number_of_nodes', 'number_of_links', 'redundancy', 'degree_per_node',
+            'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time',
+            'cost', 'across_mars_latency', 'across_mars_num_sats_in_path',
+            'min_sats_for_global', 'additional_constellation', 'upgrade_cost'
+        ]
+
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        validCount = 0
+        completed = 0
+
+        # Use all cores by default
+        if max_workers is None:
+            max_workers = os.cpu_count()
+
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_evaluate_constellation_task, task) for task in tasks]
+
+            for fut in as_completed(futures):
+                completed += 1
+                try:
+                    result = fut.result()
+                except Exception as e:
+                    print(f"[ERROR] Worker raised exception: {e}")
+                    continue
+
+                if result is not None:
+                    writer.writerow(result)
+                    validCount += 1
+
+                # Progress logging
+                if completed % 100 == 0:
+                    print(f"completed: {completed}/{len(tasks)}, valid: {validCount}")
+
+        endtime = time.time()
+        elapsedTime = (endtime - starttime) / 60.0
+        print(f"Execution time: {elapsedTime:.2f} minutes, valid constellations: {validCount}")
+
+
 if __name__ == "__main__":
     ok.initVM()
     setup_orekit_curdir(from_pip_library=True)
@@ -341,12 +565,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run PNT VSD analysis.")
     parser.add_argument("--sweep", action="store_true", help="Run sweep analysis")
     parser.add_argument("--excel", action="store_true", help="Run Excel analysis")
+    parser.add_argument("--parallel", action="store_true", help="Run parallel sweep analysis")
+
     args = parser.parse_args()
 
     if args.excel:
         run_analysis(xlsx, sheet, cell_range)
     elif args.sweep:
         runSweepAnalysis()
+    elif args.parallel:
+        runSweepAnalysis_parallel()
     else:
         print("Please specify either --sweep or --excel to run the desired analysis.")
 
