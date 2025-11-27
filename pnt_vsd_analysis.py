@@ -201,7 +201,7 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
     with open('constellation_data2.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
                       'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time', 'cost', 'mean_high_lat_P95_PDOP', 'across_mars_latency', 'across_mars_num_sats_in_path'
-                      ]
+                      ] 
 
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -213,15 +213,15 @@ def runSweepAnalysis(altRange = [8000, 20500], maxSats = 24):
         try:
             for currAlt in range(altRange[0], altRange[1], 500):
                 #sweep through inclination band
-                for i in range(20, 55, 5):
-                    for numSats in range (14,maxSats): # need to determine number of sats required to meet min5 req
+                for i in range(20, 60, 5):
+                    for numSats in range (14,maxSats+1): # need to determine number of sats required to meet min5 req
                         #get planes from precomputed list
                         planes = planes_by_sat_count.get(numSats)
                         if not planes:
                             continue
                         
                         for numPlanes in planes:
-                            for f in range(0, (numPlanes-1)):
+                            for f in range(0, (numPlanes)):
                                 attemptCount = attemptCount+1
                                 if attemptCount % 250 == 0:
                                     print(f"attempt: {attemptCount}, valid: {validCount}, alt:{currAlt} i:{i} sats:{numSats} planes:{numPlanes} f:{f}")
@@ -321,7 +321,7 @@ if __name__ == "__main__":
     sheet = "Constellation Options"
     cell_range = "A3:G14"
 
-    # Argpase --sweep, --excel
+    # Argparse --sweep, --excel
     parser = argparse.ArgumentParser(description="Run PNT VSD analysis.")
     parser.add_argument("--sweep", action="store_true", help="Run sweep analysis")
     parser.add_argument("--excel", action="store_true", help="Run Excel analysis")
