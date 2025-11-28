@@ -3,6 +3,7 @@ import orekit
 import numpy as np
 orekit.initVM()
 
+from typing import Optional
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
 
@@ -206,7 +207,11 @@ def findMinSatsForGlobal(originalConstellation: Constellation, times: List[Absol
     #                            duration_sec=duration_sec,
     #                            step_sec=step_sec)
     #check no additional sats
-    if constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=45.0, lat_max_deg=90.0,) and pdop_p95_requirement_met(originalConstellation, times, 45, 90):
+
+    if (constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=45.0, lat_max_deg=90.0) 
+        and constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=-90.0, lat_max_deg=45.0) 
+        and pdop_p95_requirement_met(originalConstellation, times, 45, 90) 
+        and pdop_p95_requirement_met(originalConstellation, times, -90, 45)):
         return 0, None
     
     # precompute possible planes so it isn't done every iteration
@@ -453,9 +458,9 @@ def pdop_p95_requirement_met(constellation,
 
 
 
-def constellation_meets_5sat_requirement(
+def constellation_meets_5sat_requirement( 
     constellation,
-    start_date: AbsoluteDate = AbsoluteDate(2025, 1, 1, 0, 0, 0.0, TimeScalesFactory.getUTC()),
+    start_date: Optional[AbsoluteDate] = None,
     lat_min_deg: float = -45.0,
     lat_max_deg: float = 45.0,
     lat_step_deg: float = 5.0,
@@ -464,51 +469,38 @@ def constellation_meets_5sat_requirement(
     lon_step_deg: float = 10.0,
     min_elev_deg: float = 10.0,
     min_sats_in_view: int = 5,
-    time_step_sec: float = 18000.0,  # sample every 30 minutes
+    time_step_sec: float = 300,
 ) -> bool:
-    """
-    Check if a constellation provides at least `min_sats_in_view` satellites
-    above `min_elev_deg` elevation for all points in the latitude band
-    [lat_min_deg, lat_max_deg] over one Martian day.
 
-    Returns:
-        True  if the requirement is met everywhere for the whole day.
-        False as soon as a violation is detected (early exit).
-    """
+    if start_date is None:
+        utc = TimeScalesFactory.getUTC()
+        start_date = AbsoluteDate(2025, 1, 1, 0, 0, 0.0, utc)
 
-    mars_shape = constellation.mars_shape  # OneAxisEllipsoid or similar
+    mars_shape = constellation.mars_shape
 
-    # Precompute list of propagators
     propagators = [sat.propagator for sat in constellation.satellites]
 
-    # Latitude / longitude grid
     lat_vals = np.arange(lat_min_deg, lat_max_deg + 1e-6, lat_step_deg)
     lon_vals = np.arange(lon_min_deg, lon_max_deg + 1e-6, lon_step_deg)
 
     min_elev_rad = math.radians(min_elev_deg)
 
-    # Build TopocentricFrames for each grid point
-    topo_frames = {}  # (i_lat, j_lon) -> TopocentricFrame
+    topo_frames = {}
     for i_lat, lat_deg in enumerate(lat_vals):
         lat_rad = math.radians(lat_deg)
         for j_lon, lon_deg in enumerate(lon_vals):
             lon_rad = math.radians(lon_deg)
-            gp = GeodeticPoint(lat_rad, lon_rad, 0.0)  # altitude = 0
-            topo = TopocentricFrame(mars_shape, gp, f"pt_{i_lat}_{j_lon}")
-            topo_frames[(i_lat, j_lon)] = topo
+            gp = GeodeticPoint(lat_rad, lon_rad, 0.0)
+            topo_frames[(i_lat, j_lon)] = TopocentricFrame(mars_shape, gp, f"pt_{i_lat}_{j_lon}")
 
-    # Length of a Martian sidereal day in seconds
     mars_sidereal_day_sec = 88642.663
     n_steps = int(math.ceil(mars_sidereal_day_sec / time_step_sec))
 
-    # Main time loop
     for k in range(n_steps):
-        date = start_date.shiftedBy(k * time_step_sec)
+        date = start_date.shiftedBy(float(k * time_step_sec))
 
-        # Propagate all satellites once at this time (reuse for all grid points)
         states = [prop.propagate(date) for prop in propagators]
 
-        # For each ground grid point, count visible satellites
         for (i_lat, j_lon), topo in topo_frames.items():
             visible_count = 0
             for state in states:
@@ -518,15 +510,11 @@ def constellation_meets_5sat_requirement(
 
                 if elev >= min_elev_rad:
                     visible_count += 1
-                    # As soon as we hit the minimum, no need to check more sats here
                     if visible_count >= min_sats_in_view:
                         break
 
-            # Requirement violation: fewer than min_sats_in_view at this point/time
             if visible_count < min_sats_in_view:
                 return False
 
-    # If we get here, no violations were found over the entire day
     return True
-
 

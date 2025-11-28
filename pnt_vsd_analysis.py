@@ -234,8 +234,8 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
 
                             constellation = build_constellation(cfg)
 
-                            #check requirements (only checking one hemisphere for efficiency)
-                            if not constellation_meets_5sat_requirement(constellation, lat_min_deg=0, lat_max_deg=45):
+                            #check requirements 
+                            if not constellation_meets_5sat_requirement(constellation, lat_min_deg=-45, lat_max_deg=45):
                                 continue
 
                             times, inertial_pvs, fixed_pvs = propagate(
@@ -462,7 +462,7 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
     starttime = time.time()
 
     duration_sec = 24 * 3600      # 24 hours
-    step_sec = 300 * 6            # 30 min
+    step_sec = 300            # 5 min
 
     # Precompute possible planes so it isn't done every iteration
     planes_by_sat_count = {}
