@@ -392,32 +392,27 @@ def calculateCost(planes, sats):
 
     return sats*avgSatCost + FH_LaunchCost*planes
 
-import math
-
 def approximateOverHeadPassTime(altitude_km):
-    altitude = altitude_km*1000
-    elev_mask_deg=10
-    mu = 4.2828e13
-    # Convert elevation to radians
-    e = math.radians(elev_mask_deg)
+    R = 3396.18255 # Mars radius in km
+    ep_mask = 10*(np.pi/180)
+    mu = 4.282837*1e4 #Mars gravitational parameter (km^3/s^2)
 
-    # Orbit radius
-    R_MARS = 3389_500.0e3
-    r = R_MARS + altitude
+    A = R + altitude_km #semi major axis
+    B=R
 
-    # Central angle visible above the elevation mask
-    cos_psi = (R_MARS / r) * math.cos(e)
-    # Numerical safety clamp
-    cos_psi = max(min(cos_psi, 1.0), -1.0)
+    cos_psi_max = (B*(np.cos(ep_mask)**2) + np.sin(ep_mask)*np.sqrt(A**2+B**2 * (np.cos(ep_mask)**2)))/A
+    psi_max = np.arccos(cos_psi_max)
 
-    psi = math.acos(cos_psi)   # radians
+    w_omega = np.sqrt(mu/(A**3)) #mean angular rate for circular orbit around Mars
+    omega_sat = w_omega*(B/A) # angular rate of sats subpoint on Mars
+    omega_mars = (2*np.pi)/88642; #angular rotation of Mars
 
-    # Mean motion (rad/s)
-    n = math.sqrt(mu / r**3)
+    O_omega = abs(omega_sat-omega_mars) 
 
-    # Estimated pass duration
-    T_pass = (2 * psi) / n
-    return T_pass
+    T_m = ((2*psi_max)/O_omega) / 60 #minutes
+    return T_m
+
+
 
 
 def compute_across_mars_latency(
