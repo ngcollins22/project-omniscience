@@ -359,7 +359,7 @@ def compute_network_metrics(latency_tensor: np.ndarray) -> Tuple[float, float, f
         adjacency_matrix_instant = adjacency_matrix[i] # grab the NxN matrix at time i
 
         number_of_links[i] = np.nansum(adjacency_matrix_instant) / 2  # undirected graph
-        redundancies[i] = number_of_links[i] - min_links
+        redundancies[i] = number_of_links[i] / min_links
 
         average_degrees[i] = np.nanmean(np.nansum(adjacency_matrix_instant, axis=0))
         densities[i] = average_degrees[i] / (n_nodes - 1)
