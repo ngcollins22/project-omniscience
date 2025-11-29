@@ -412,9 +412,6 @@ def approximateOverHeadPassTime(altitude_km):
     T_m = ((2*psi_max)/O_omega) / 60 #minutes
     return T_m
 
-
-
-
 def compute_across_mars_latency(
                                 constellation: Constellation, 
                                 times: List[AbsoluteDate], 
