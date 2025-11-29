@@ -466,7 +466,7 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
 
     # Precompute possible planes so it isn't done every iteration
     planes_by_sat_count = {}
-    for numSats in range(1, maxSatsInput):
+    for numSats in range(1, maxSatsInput+1):
         d = divisors(numSats)
         d = [p for p in d if p != 1 and p <= 6]
         if d:
