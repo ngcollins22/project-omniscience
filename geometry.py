@@ -395,7 +395,7 @@ def calculateConstellationCost(planes:int, sats:int)->float:
 
     return sats*avgSatCost + FH_LaunchCost*planes
 
-def approximateOverHeadPassTime(altitude_km:float)->float:
+def calculateOverHeadPassTime(altitude_km:float)->float:
     """This function calculates the overhead pass time in seconds
       for a satelite orbiting Mars at the specified altitude"""
     R = 3396.18255 # Mars radius in km

@@ -204,7 +204,7 @@ def divisors(n: int) -> list[int]:
                 divs.append(n // i)
     return sorted(divs)
 
-def findMinSatsForGlobal(originalConstellation: Constellation, times: List[AbsoluteDate],planes_by_sat_count, maxSats:int = 21, i:float = 75)-> Tuple[int, ConstellationConfig]:
+def findMinSatsForGlobal(originalConstellation: Constellation, times: List[AbsoluteDate],planes_by_sat_count, minimumSats:int=3, maxSats:int = 21, i:float = 75)-> Tuple[int, ConstellationConfig]:
     """Returns both the minimum number of additional satellites for global coverage and the added constellation config in a Tuple. 
     Assumes the same altitude as the original constellation and an inclination of 75 as a default unless only 1 plane in which case i = 90
         The list of planes per satellites number and the times are passed in so they aern't recomputed every time for effiency"""
@@ -217,7 +217,7 @@ def findMinSatsForGlobal(originalConstellation: Constellation, times: List[Absol
     #                            step_sec=step_sec)
     #check no additional sats
 
-    #I think its faster to just check high and low latitudes rather than globally at once.
+    #I think its faster to check high and low latitudes sperately rather than globally at once.
     if (constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=45.0, lat_max_deg=90.0) 
         and constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=-90.0, lat_max_deg=-45.0) 
         and pdop_p95_requirement_met(originalConstellation, times, 45, 90) 
@@ -228,7 +228,7 @@ def findMinSatsForGlobal(originalConstellation: Constellation, times: List[Absol
   
     attemptCount = 0
     #generate range of sat numbers
-    Trange = range(3, maxSats+1)
+    Trange = range(minimumSats, maxSats+1)
     for T in Trange:
         #get correct list of planes from precomputed planes
         planes = planes_by_sat_count.get(T)
@@ -254,7 +254,7 @@ def findMinSatsForGlobal(originalConstellation: Constellation, times: List[Absol
                                 pattern=str('DELTA'))
                 #creates the couble constellation
                 doubleConstellation = addConstellation(additionalcfg, originalConstellation)
-                
+                #print(str(curr_i) + " "+str(T)+"/"+str(numPlanes))
 
                 if (constellation_meets_5sat_requirement(doubleConstellation, lat_min_deg=45.0, lat_max_deg=90.0) 
                     and constellation_meets_5sat_requirement(doubleConstellation, lat_min_deg=-90.0, lat_max_deg=-45.0) 

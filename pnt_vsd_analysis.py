@@ -4,7 +4,7 @@ from mars_constellation import Constellation, ConstellationConfig, build_constel
 from typing import List
 from read_constellations import read_constellations, clean_path
 from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap, plot_across_mars_path
-from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateConstellationCost, compute_across_mars_latency
+from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, calculateOverHeadPassTime, calculateConstellationCost, compute_across_mars_latency
 import csv
 import time
 import numpy as np
@@ -44,7 +44,7 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
     
     with open('constellation_data.csv', 'w', newline='') as csvfile:
         fieldnames = ['name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km', 'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric', 'number_of_nodes', 
-                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient', 'across_mars_latency', 'across_mars_num_sats_in_path'
+                      'number_of_links', 'redundancy', 'degree_per_node', 'density_per_node', 'average_clustering_coefficient','overhead_pass_time', 'cost', 'across_mars_latency', 'across_mars_num_sats_in_path', 'min_sats_for_global', 'additional_constellation', 'upgrade_cost'
                       ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -150,6 +150,36 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
             # for t_idx, latency_matrix in enumerate(latency_matrices):
             #     print(f"Time step {t_idx}:")
             #     print(latency_matrix)
+            overheadPassTime = calculateOverHeadPassTime(cfg.altitude_km)
+
+            cost = calculateConstellationCost(cfg.planes, cfg.total_sats)
+                            #_, _, highLatP95PDOP = compute_pdop_p95_map(constellation, times, 45.0, 0.0)
+                            #meanHighLatPDOP = np.nanmean(highLatP95PDOP)
+
+                            #Purpose: Find minimum additional satelites for global coverage (PDOP<6)
+                            #call a function, pass it the original constellation, have it build new additional constellations until it finds the minimum
+                            #sweep satelites first 0-21 in increasing order, all planes 1-4 planes( this excludes ), i = 75, all f, exit at earlist solution
+                            #return number of additional sats, and the constellation that worked
+
+            #the findMinSatsForGlobal requires a list of orbital planes based on number of satelites. This was done for efficiency in the sweep but is clunky here
+           
+            planes_by_sat_count = {}
+            for numSats in range(1, cfg.total_sats):
+                d = divisors(numSats)
+                d = [p for p in d if p <= 6]
+                if d:
+                    planes_by_sat_count[numSats] = d
+            #print(planes_by_sat_count)
+            #calculate minimum satellites for global coverage
+            minSatsForGlobal, c2 = findMinSatsForGlobal(constellation, times, planes_by_sat_count, minimumSats=int(cfg.total_sats/5), maxSats=cfg.total_sats)
+            if c2:
+                additionalConstString = str("i="+str(c2.inclination_deg)+":" + str(c2.total_sats)+"/"+str(c2.planes)+"/"+str(c2.phasing)+" alt="+str(c2.altitude_km))
+                upgradeCost = calculateConstellationCost(c2.planes, c2.total_sats)
+            else:
+                additionalConstString = "None"
+                upgradeCost=0
+
+            print("Upgrade constellation: " + additionalConstString + " costs: " + str(upgradeCost))
 
             # Write the data out
             writer.writerow({
@@ -169,8 +199,13 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
                 'degree_per_node': av_degree_per_node,
                 'density_per_node': av_density_per_node,
                 'average_clustering_coefficient': av_average_clustering_coefficient,
+                'overhead_pass_time': overheadPassTime, 
+                'cost': cost,
                 'across_mars_latency': across_mars_latency, 
-                'across_mars_num_sats_in_path': len(path)
+                'across_mars_num_sats_in_path': len(path),
+                'min_sats_for_global': minSatsForGlobal, 
+                'additional_constellation': additionalConstString, 
+                'upgrade_cost':upgradeCost
             })
 
 
@@ -186,7 +221,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
     planes_by_sat_count = {}
     for numSats in range(1, maxSatsInput):
         d = divisors(numSats)
-        d = [p for p in d if p != 1 and p <= 6]
+        d = [p for p in d if p <= 6]
         if d:
             planes_by_sat_count[numSats] = d
     
@@ -215,6 +250,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
                 for numSats in range (minSats,maxSats+1): # need to determine number of sats required to meet min5 req
                     #get planes from precomputed list
                     planes = planes_by_sat_count.get(numSats)
+                    planes = [p for p in planes if p != 1]
                     if not planes:
                         continue
                     
@@ -280,7 +316,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
                 
                             dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids) # compute self-DOP for each satellite
                             warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details
-                            overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
+                            overheadPassTime = calculateOverHeadPassTime(cfg.altitude_km)
                             cost = calculateConstellationCost(cfg.planes, cfg.total_sats)
                             #_, _, highLatP95PDOP = compute_pdop_p95_map(constellation, times, 45.0, 0.0)
                             #meanHighLatPDOP = np.nanmean(highLatP95PDOP)
@@ -294,7 +330,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
                         
 
                             if c2:
-                                additionalConstString = str(c2.total_sats)+"/"+str(c2.planes)+"/"+str(c2.phasing)+" alt="+str(c2.altitude_km)+ " i="+str(c2.inclination_deg)
+                                additionalConstString = str("i="+str(c2.inclination_deg)+":" + str(c2.total_sats)+"/"+str(c2.planes)+"/"+str(c2.phasing)+" alt="+str(c2.altitude_km))
                                 upgradeCost = calculateConstellationCost(c2.planes, c2.total_sats)
 
                             else:
@@ -418,14 +454,15 @@ def _evaluate_constellation_task(task):
     dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids)
     warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self)
 
-    overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
+    overheadPassTime = calculateOverHeadPassTime(cfg.altitude_km)
     cost = calculateConstellationCost(cfg.planes, cfg.total_sats)
 
     # Extra constellation for global coverage (using same planes_by_sat_count and times)
     minSatsForGlobal, c2 = findMinSatsForGlobal(constellation, times, planes_by_sat_count)
 
     if c2:
-        additionalConstString = f"{c2.total_sats}/{c2.planes}/{c2.phasing} alt={c2.altitude_km} i={c2.inclination_deg}"
+        # I need to just make a toString method
+        additionalConstString = str("i="+str(c2.inclination_deg)+":" + str(c2.total_sats)+"/"+str(c2.planes)+"/"+str(c2.phasing)+" alt="+str(c2.altitude_km))
         upgradeCost = calculateConstellationCost(c2.planes, c2.total_sats)
     else:
         additionalConstString = "None"
@@ -468,7 +505,7 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
     planes_by_sat_count = {}
     for numSats in range(1, maxSatsInput+1):
         d = divisors(numSats)
-        d = [p for p in d if p != 1 and p <= 6]
+        d = [p for p in d if p <= 6]
         if d:
             planes_by_sat_count[numSats] = d
 
@@ -487,6 +524,7 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
         for inc in range(20, 60, 5):
             for numSats in range(minSats, maxSats + 1):
                 planes = planes_by_sat_count.get(numSats)
+                planes = [p for p in planes if p != 1]
                 if not planes:
                     continue
 
@@ -552,12 +590,14 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
         elapsedTime = (endtime - starttime) / 60.0
         print(f"Execution time: {elapsedTime:.2f} minutes, valid constellations: {validCount}")
 
+def additionalCostForGlobalCalc():
+    print()
 
 if __name__ == "__main__":
     ok.initVM()
     setup_orekit_curdir(from_pip_library=True)
-
-    xlsx = clean_path(r"C:\Users\natha\OneDrive - Virginia Tech\Tabor, Andrew's files - RASCAL_MarsPNT_1\AHP and VSD Spreadsheets for Project\NEW AHP and VSD.xlsx")
+    #C:\Users\natha\OneDrive - Virginia Tech\Tabor, Andrew's files - RASCAL_MarsPNT_1\AHP and VSD Spreadsheets for Project\NEW AHP and VSD.xlsx"
+    xlsx = clean_path(r"C:\Users\awt\Downloads\NEWAHPandVSDlocal.xlsx")
     sheet = "Constellation Options"
     cell_range = "A3:G14"
 
