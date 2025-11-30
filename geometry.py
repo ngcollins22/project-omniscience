@@ -386,13 +386,18 @@ def compute_network_metrics(latency_tensor: np.ndarray) -> Tuple[float, float, f
     
     return (number_of_links, redundancies, average_degrees, densities, clustering_coeffs)
 
-def calculateCost(planes, sats):
+def calculateConstellationCost(planes:int, sats:int)->float:
+    """This function calculates the cost of ONLY the Mars constellation
+        It assumes one falcon heavy launch per orbital plane
+        and that each satellite costs the same as an average Earth GNSS satellite"""
     avgSatCost = 136400000
     FH_LaunchCost = 150e6
 
     return sats*avgSatCost + FH_LaunchCost*planes
 
-def approximateOverHeadPassTime(altitude_km):
+def approximateOverHeadPassTime(altitude_km:float)->float:
+    """This function calculates the overhead pass time in seconds
+      for a satelite orbiting Mars at the specified altitude"""
     R = 3396.18255 # Mars radius in km
     ep_mask = 10*(np.pi/180)
     mu = 4.282837*1e4 #Mars gravitational parameter (km^3/s^2)
@@ -409,8 +414,8 @@ def approximateOverHeadPassTime(altitude_km):
 
     O_omega = abs(omega_sat-omega_mars) 
 
-    T_m = ((2*psi_max)/O_omega) / 60 #minutes
-    return T_m
+    T_s = ((2*psi_max)/O_omega)
+    return T_s
 
 def compute_across_mars_latency(
                                 constellation: Constellation, 

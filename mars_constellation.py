@@ -101,7 +101,7 @@ def build_constellation(config: ConstellationConfig) -> Constellation:
             sat_id += 1
 
     return Constellation(
-        config=config,
+        config=config, 
         epoch=epoch,
         satellites=satellites,
         mars_inertial=inertial,
@@ -112,6 +112,9 @@ def build_constellation(config: ConstellationConfig) -> Constellation:
 
 
 def addConstellation(secondConfig: ConstellationConfig, originalConst: Constellation) -> Constellation:
+    """This definition takes a constellation object and adds a new Walker-Delta constellation to the 
+    satellites that are already there. It is used to create the "double" constellations in the analysis 
+    of how many additional satellites are required for global coverage"""
     utc = TimeScalesFactory.getUTC()
     epoch = AbsoluteDate(2025, 1, 1, 0, 0, 0.0, utc)
 
@@ -120,7 +123,7 @@ def addConstellation(secondConfig: ConstellationConfig, originalConst: Constella
     inertial = mars.getInertiallyOrientedFrame()
     fixed = mars.getBodyOrientedFrame()
 
-    # Mars ellipsoid (IAU value)
+    # Mars ellipsoid 
     R_mars = 3394200.0  # meters
     f_mars = 0.00589
     mars_shape = OneAxisEllipsoid(R_mars, f_mars, fixed)
@@ -137,16 +140,18 @@ def addConstellation(secondConfig: ConstellationConfig, originalConst: Constella
                                 PositionAngleType.MEAN,
                                 inertial, epoch, mu)
 
-    # Walker constellation
+    # New Walker constellation
     walker = WalkerConstellation(secondConfig.total_sats, secondConfig.planes, secondConfig.phasing)
     slot_matrix = walker.buildRegularSlots(ref_orbit)
 
     satellites = list(originalConst.satellites)  # copy list
+    #set the new satelite id to start at the max of the previous list +1
     if satellites:
         sat_id = max(s.sat_id for s in satellites) + 1
     else:
         sat_id = 0
 
+    #iterate through and add new satellites
     for p in range(slot_matrix.size()):
         plane_slots = JavaList.cast_(slot_matrix.get(p))
         for s in range(plane_slots.size()):
@@ -157,9 +162,9 @@ def addConstellation(secondConfig: ConstellationConfig, originalConst: Constella
             sat_id += 1
 
     return Constellation(
-        config=secondConfig,
-        epoch=epoch,
-        satellites=satellites,
+        config=secondConfig, #This currently works but is misleading since it only represents the second configuration
+        epoch=epoch,         
+        satellites=satellites, #but the satellites includes the satellites from both constellations
         mars_inertial=inertial,
         mars_fixed=fixed,
         mars_shape=mars_shape
@@ -189,6 +194,8 @@ def propagate(constellation: Constellation,
 
 
 def divisors(n: int) -> list[int]:
+    """This is a helper function that is useful for determing the possible 
+    number of orbital planes for a specific number of satellites in a Walker Delta constellation"""
     divs = []
     for i in range(1, int(n**0.5) + 1):
         if n % i == 0:
@@ -197,8 +204,10 @@ def divisors(n: int) -> list[int]:
                 divs.append(n // i)
     return sorted(divs)
 
-def findMinSatsForGlobal(originalConstellation: Constellation, times: List[AbsoluteDate],planes_by_sat_count, maxSats = 21, i = 75)-> Tuple[int, ConstellationConfig]:
-    #returns minimum number of additional satellites for global and the working constellation
+def findMinSatsForGlobal(originalConstellation: Constellation, times: List[AbsoluteDate],planes_by_sat_count, maxSats:int = 21, i:float = 75)-> Tuple[int, ConstellationConfig]:
+    """Returns both the minimum number of additional satellites for global coverage and the added constellation config in a Tuple. 
+    Assumes the same altitude as the original constellation and an inclination of 75 as a default unless only 1 plane in which case i = 90
+        The list of planes per satellites number and the times are passed in so they aern't recomputed every time for effiency"""
     #duration_sec = 24 * 3600      # 24 hours
     #step_sec = 300*6               # 30 min
     #alt = originalConstellation.config.altitude_km
@@ -208,36 +217,33 @@ def findMinSatsForGlobal(originalConstellation: Constellation, times: List[Absol
     #                            step_sec=step_sec)
     #check no additional sats
 
+    #I think its faster to just check high and low latitudes rather than globally at once.
     if (constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=45.0, lat_max_deg=90.0) 
-        and constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=-90.0, lat_max_deg=45.0) 
+        and constellation_meets_5sat_requirement(originalConstellation, lat_min_deg=-90.0, lat_max_deg=-45.0) 
         and pdop_p95_requirement_met(originalConstellation, times, 45, 90) 
-        and pdop_p95_requirement_met(originalConstellation, times, -90, 45)):
+        and pdop_p95_requirement_met(originalConstellation, times, -90, -45)):
         return 0, None
     
     # precompute possible planes so it isn't done every iteration
-    #planes_by_sat_count = {}
-    #for numSats in range(1, maxSats+1):
-    #    d = divisors(numSats)
-    #    d = [p for p in d if p <= 4] #limiting to four planes
-    #    if d:
-    #        planes_by_sat_count[numSats] = d
-
+  
     attemptCount = 0
-    #generate range of sat numbers, didn't include 1 cus asymetry
+    #generate range of sat numbers
     Trange = range(3, maxSats+1)
     for T in Trange:
-        #get precomputed planes
+        #get correct list of planes from precomputed planes
         planes = planes_by_sat_count.get(T)
         if not planes:
             continue
         for numPlanes in planes:
-            #if only 1 plane, i = 90 
+            #if only 1 plane, i = 90. This seems to never win but ill leave it in
             if numPlanes ==1:
                 curr_i = 90
             else:
                 curr_i = i
             for f in range(0, (numPlanes)):
                 attemptCount = attemptCount+1
+                #make the new additional configuration that will be evaluated against the requirements
+                #assumes same altitude as original
                 additionalcfg = ConstellationConfig(
                                 name = str("c2nd"+(str(attemptCount))),
                                 inclination_deg=float(curr_i),
@@ -246,14 +252,14 @@ def findMinSatsForGlobal(originalConstellation: Constellation, times: List[Absol
                                 phasing=int(f),
                                 altitude_km=float(originalConstellation.config.altitude_km),
                                 pattern=str('DELTA'))
-
+                #creates the couble constellation
                 doubleConstellation = addConstellation(additionalcfg, originalConstellation)
-                #times, _, _ = propagate(
-                #                doubleConstellation,
-                #                duration_sec=duration_sec,
-                #                step_sec=step_sec)
-                if constellation_meets_5sat_requirement(doubleConstellation, lat_min_deg=45.0, lat_max_deg=90.0,) and pdop_p95_requirement_met(doubleConstellation, times, 45, 89):      
-                    #print(str(T)+"/"+str(numPlanes)+"/"+str(f))
+                
+
+                if (constellation_meets_5sat_requirement(doubleConstellation, lat_min_deg=45.0, lat_max_deg=90.0) 
+                    and constellation_meets_5sat_requirement(doubleConstellation, lat_min_deg=-90.0, lat_max_deg=-45.0) 
+                    and pdop_p95_requirement_met(doubleConstellation, times, 45, 90) 
+                    and pdop_p95_requirement_met(doubleConstellation, times, -90, -45)):
                     return T, additionalcfg
     #if it fails to find something
     return -1, None
@@ -381,16 +387,16 @@ def compute_pdop_p95_map(constellation,
 
     return lat_vals, lon_vals, p95_pdop
 
-def pdop_p95_requirement_met(constellation,
-                             times,
-                             lat_min_deg=-45.0,
-                             lat_max_deg=45.0,
-                             lat_step_deg=5.0,
-                             lon_min_deg=-180.0,
-                             lon_max_deg=180.0,
-                             lon_step_deg=10.0,
-                             min_elev_deg=5.0,
-                             pdop_limit=6.0):
+def pdop_p95_requirement_met(constellation: Constellation,
+                             times: List,
+                             lat_min_deg: float=-45.0,
+                             lat_max_deg: float=45.0,
+                             lat_step_deg: float=5.0,
+                             lon_min_deg: float=-180.0,
+                             lon_max_deg: float=180.0,
+                             lon_step_deg: float=10.0,
+                             min_elev_deg: float=5.0,
+                             pdop_limit: float=6.0)->bool:
     """
     Fast early-exit PDOP P95 check.
     Returns True if EVERY grid point has P95 PDOP <= pdop_limit.
@@ -426,7 +432,8 @@ def pdop_p95_requirement_met(constellation,
     for date in times:
         for key, comp in dop_computers.items():
 
-            # catch singular-matrix cases
+            # catch singular-matrix cases that was causing issues (is there an underlying 
+            # cause that needs to be addressed rather than just catching the error?)
             try:
                 dop = comp.compute(date, gnss_list)
                 pdop_val = dop.getPdop()
@@ -441,6 +448,7 @@ def pdop_p95_requirement_met(constellation,
                 n = len(rec)
                 if n >= 20:  # avoid unstable early percentiles
                     sorted_vals = sorted(rec)
+                    #there may be a better way to do this part... not sure what about the other PDOP function makes it P95
                     idx95 = int(0.95 * (n - 1))
                     if sorted_vals[idx95] > pdop_limit:
                         return False  # EARLY EXIT
@@ -454,7 +462,7 @@ def pdop_p95_requirement_met(constellation,
         if p95 > pdop_limit:
             return False
 
-    return True  # all good
+    return True  # requirement met
 
 
 
@@ -486,6 +494,7 @@ def constellation_meets_5sat_requirement(
     min_elev_rad = math.radians(min_elev_deg)
 
     topo_frames = {}
+    #get frames for lat long grid
     for i_lat, lat_deg in enumerate(lat_vals):
         lat_rad = math.radians(lat_deg)
         for j_lon, lon_deg in enumerate(lon_vals):
@@ -496,6 +505,7 @@ def constellation_meets_5sat_requirement(
     mars_sidereal_day_sec = 88642.663
     n_steps = int(math.ceil(mars_sidereal_day_sec / time_step_sec))
 
+    #time loop
     for k in range(n_steps):
         date = start_date.shiftedBy(float(k * time_step_sec))
 
@@ -516,5 +526,5 @@ def constellation_meets_5sat_requirement(
             if visible_count < min_sats_in_view:
                 return False
 
-    return True
+    return True #requirement met
 

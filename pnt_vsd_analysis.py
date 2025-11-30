@@ -4,7 +4,7 @@ from mars_constellation import Constellation, ConstellationConfig, build_constel
 from typing import List
 from read_constellations import read_constellations, clean_path
 from visualization import show_mars_basemap_from_file, plot_ground_tracks_on_basemap, plot_pdop_p95_map_on_basemap, plot_across_mars_path
-from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateCost, compute_across_mars_latency
+from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies, estimate_warm_start_time_metric, compute_network_metrics, approximateOverHeadPassTime, calculateConstellationCost, compute_across_mars_latency
 import csv
 import time
 import numpy as np
@@ -281,7 +281,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
                             dop_self = compute_self_dop_from_latencies(times, latencies, inertial_pvs, sat_ids) # compute self-DOP for each satellite
                             warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self) # estimate warm-start time metric, see function for details
                             overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
-                            cost = calculateCost(cfg.planes, cfg.total_sats)
+                            cost = calculateConstellationCost(cfg.planes, cfg.total_sats)
                             #_, _, highLatP95PDOP = compute_pdop_p95_map(constellation, times, 45.0, 0.0)
                             #meanHighLatPDOP = np.nanmean(highLatP95PDOP)
 
@@ -295,7 +295,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
 
                             if c2:
                                 additionalConstString = str(c2.total_sats)+"/"+str(c2.planes)+"/"+str(c2.phasing)+" alt="+str(c2.altitude_km)+ " i="+str(c2.inclination_deg)
-                                upgradeCost = calculateCost(c2.planes, c2.total_sats)
+                                upgradeCost = calculateConstellationCost(c2.planes, c2.total_sats)
 
                             else:
                                 additionalConstString = "None"
@@ -419,14 +419,14 @@ def _evaluate_constellation_task(task):
     warm_start_time_metrics, p95_warm_start_time_metric = estimate_warm_start_time_metric(times, dop_self)
 
     overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
-    cost = calculateCost(cfg.planes, cfg.total_sats)
+    cost = calculateConstellationCost(cfg.planes, cfg.total_sats)
 
     # Extra constellation for global coverage (using same planes_by_sat_count and times)
     minSatsForGlobal, c2 = findMinSatsForGlobal(constellation, times, planes_by_sat_count)
 
     if c2:
         additionalConstString = f"{c2.total_sats}/{c2.planes}/{c2.phasing} alt={c2.altitude_km} i={c2.inclination_deg}"
-        upgradeCost = calculateCost(c2.planes, c2.total_sats)
+        upgradeCost = calculateConstellationCost(c2.planes, c2.total_sats)
     else:
         additionalConstString = "None"
         upgradeCost = 0
@@ -458,7 +458,7 @@ def _evaluate_constellation_task(task):
         'upgrade_cost': upgradeCost,
     }
 
-def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_workers=10):
+def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_workers=None):
     starttime = time.time()
 
     duration_sec = 24 * 3600      # 24 hours
@@ -525,9 +525,9 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
         validCount = 0
         completed = 0
 
-        # Use all cores by default
+        # Use all but 2 cores
         if max_workers is None:
-            max_workers = os.cpu_count()
+            max_workers = os.cpu_count() -2
 
         with ProcessPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_evaluate_constellation_task, task) for task in tasks]
@@ -576,7 +576,7 @@ if __name__ == "__main__":
     elif args.parallel:
         runSweepAnalysis_parallel()
     else:
-        print("Please specify either --sweep or --excel to run the desired analysis.")
+        print("Please specify either --sweep, --excel, or --parallel to run the desired analysis.")
 
     
     
