@@ -8,6 +8,7 @@ from geometry import compute_los_latency_tensor, compute_self_dop_from_latencies
 import csv
 import time
 import numpy as np
+import pandas as pd
 
 import argparse
 
@@ -127,21 +128,21 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
             across_mars_latency, path, path_latencies = compute_across_mars_latency(constellation, times, latencies, inertial_pvs, sat_ids)
             print(f"Worst-case across-Mars latency: {across_mars_latency:.2f} seconds using {len(path)} satellites for constellation '{cfg.name}' ({i}).")
 
-            # Visualize the across-Mars path at the first timestep
-            # plot_across_mars_path( # Uncomment to enable plotting
-            #     constellation,
-            #     times,
-            #     inertial_pvs,
-            #     sat_ids,
-            #     path,
-            #     path_latencies,
-            #     mars_texture_path=None,
-            #     t_idx=0, # lazy just make sure this is the same as in compute_across_mars_latency
-            #     lat1=0.0,
-            #     lon1=0.0,
-            #     lat2=0.0,
-            #     lon2=180.0
-            # )
+            #Visualize the across-Mars path at the first timestep
+            plot_across_mars_path( # Uncomment to enable plotting
+                constellation,
+                times,
+                inertial_pvs,
+                sat_ids,
+                path,
+                path_latencies,
+                mars_texture_path="mars_viking_full.jpg",
+                t_idx=0, # lazy just make sure this is the same as in compute_across_mars_latency
+                lat1=0.0,
+                lon1=0.0,
+                lat2=0.0,
+                lon2=180.0
+            )
 
             # Need to compute age of clock and age of epheremis next
             # And approximate time-to-first-fix (TTFF) as well
@@ -420,6 +421,7 @@ def _evaluate_constellation_task(task):
 
     overheadPassTime = approximateOverHeadPassTime(cfg.altitude_km)
     cost = calculateCost(cfg.planes, cfg.total_sats)
+    inverse_square_law_coeff = 1.0 / (cfg.altitude_km ** 2)
 
     # Extra constellation for global coverage (using same planes_by_sat_count and times)
     minSatsForGlobal, c2 = findMinSatsForGlobal(constellation, times, planes_by_sat_count)
@@ -451,6 +453,7 @@ def _evaluate_constellation_task(task):
         'average_clustering_coefficient': av_average_clustering_coefficient,
         'overhead_pass_time': overheadPassTime,
         'cost': cost,
+        'inverse_square_law_coeff': inverse_square_law_coeff,
         'across_mars_latency': across_mars_latency,
         'across_mars_num_sats_in_path': len(path),
         'min_sats_for_global': minSatsForGlobal,
@@ -508,58 +511,89 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
 
     print(f"Total configurations to evaluate: {len(tasks)}")
 
-    # Run tasks in parallel and write results as they complete
-    with open('constellation_data_parallel2.csv', 'w', newline='') as csvfile:
-        fieldnames = [
-            'name', 'inclination_deg', 'total_sats', 'planes', 'phasing', 'altitude_km',
-            'pattern', 'meets_pdop_6_requirement', 'p95_pdop', 'p95_warm_start_time_metric',
-            'number_of_nodes', 'number_of_links', 'redundancy', 'degree_per_node',
-            'density_per_node', 'average_clustering_coefficient', 'overhead_pass_time',
-            'cost', 'across_mars_latency', 'across_mars_num_sats_in_path',
-            'min_sats_for_global', 'additional_constellation', 'upgrade_cost'
-        ]
+    # Run tasks in parallel and collect results in a list
+    results_list = []
+    validCount = 0
+    completed = 0
 
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
+    # Use all cores by default
+    if max_workers is None:
+        max_workers = os.cpu_count()
 
-        validCount = 0
-        completed = 0
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_evaluate_constellation_task, task) for task in tasks]
 
-        # Use all cores by default
-        if max_workers is None:
-            max_workers = os.cpu_count()
+        for fut in as_completed(futures):
+            completed += 1
+            try:
+                result = fut.result()
+            except Exception as e:
+                print(f"[ERROR] Worker raised exception: {e}")
+                continue
 
-        with ProcessPoolExecutor(max_workers=max_workers) as pool:
-            futures = [pool.submit(_evaluate_constellation_task, task) for task in tasks]
+            if result is not None:
+                results_list.append(result)
+                validCount += 1
 
-            for fut in as_completed(futures):
-                completed += 1
-                try:
-                    result = fut.result()
-                except Exception as e:
-                    print(f"[ERROR] Worker raised exception: {e}")
-                    continue
+            # Progress logging
+            if completed % 100 == 0:
+                print(f"completed: {completed}/{len(tasks)}, valid: {validCount}")
 
-                if result is not None:
-                    writer.writerow(result)
-                    validCount += 1
-
-                # Progress logging
-                if completed % 100 == 0:
-                    print(f"completed: {completed}/{len(tasks)}, valid: {validCount}")
-
-        endtime = time.time()
-        elapsedTime = (endtime - starttime) / 60.0
-        print(f"Execution time: {elapsedTime:.2f} minutes, valid constellations: {validCount}")
+    # Build dataframe from results
+    df = pd.DataFrame(results_list)
+    
+    # Add normalized metrics (min-max normalization: 0 to 1)
+    # For metrics where lower is better, we invert the normalization
+    
+    # Number of satellites (higher is better)
+    df['normalized_total_sats'] = (df['total_sats'] - df['total_sats'].min()) / (df['total_sats'].max() - df['total_sats'].min())
+    
+    # Redundancy ratio (higher is better)
+    df['normalized_redundancy'] = (df['redundancy'] - df['redundancy'].min()) / (df['redundancy'].max() - df['redundancy'].min())
+    
+    # Overhead pass time (higher is better)
+    df['normalized_overhead_pass_time'] = (df['overhead_pass_time'] - df['overhead_pass_time'].min()) / (df['overhead_pass_time'].max() - df['overhead_pass_time'].min())
+    
+    # Warm start time to first fix metric (lower is better)
+    df['normalized_p95_warm_start_time_metric'] = 1 - (df['p95_warm_start_time_metric'] - df['p95_warm_start_time_metric'].min()) / (df['p95_warm_start_time_metric'].max() - df['p95_warm_start_time_metric'].min())
+    
+    # Clustering coefficient (higher is better)
+    df['normalized_average_clustering_coefficient'] = (df['average_clustering_coefficient'] - df['average_clustering_coefficient'].min()) / (df['average_clustering_coefficient'].max() - df['average_clustering_coefficient'].min())
+    
+    # P95 PDOP (lower is better)
+    df['normalized_p95_pdop'] = 1 - (df['p95_pdop'] - df['p95_pdop'].min()) / (df['p95_pdop'].max() - df['p95_pdop'].min())
+    
+    # Average density (higher is better)
+    df['normalized_density_per_node'] = (df['density_per_node'] - df['density_per_node'].min()) / (df['density_per_node'].max() - df['density_per_node'].min())
+    
+    # Max orbiter latency (across mars latency, lower is better)
+    df['normalized_across_mars_latency'] = 1 - (df['across_mars_latency'] - df['across_mars_latency'].min()) / (df['across_mars_latency'].max() - df['across_mars_latency'].min())
+    
+    # Cost (lower is better)
+    df['normalized_cost'] = 1 - (df['cost'] - df['cost'].min()) / (df['cost'].max() - df['cost'].min())
+    
+    # Upgrade cost (lower is better)
+    df['normalized_upgrade_cost'] = 1 - (df['upgrade_cost'] - df['upgrade_cost'].min()) / (df['upgrade_cost'].max() - df['upgrade_cost'].min())
+    
+    # Inverse square law coefficient (higher is better, as it represents closer proximity)
+    df['normalized_inverse_square_law_coeff'] = (df['inverse_square_law_coeff'] - df['inverse_square_law_coeff'].min()) / (df['inverse_square_law_coeff'].max() - df['inverse_square_law_coeff'].min())
+    
+    # Write dataframe to CSV
+    df.to_csv('constellation_data_parallel2.csv', index=False)
+    
+    endtime = time.time()
+    elapsedTime = (endtime - starttime) / 60.0
+    print(f"Execution time: {elapsedTime:.2f} minutes, valid constellations: {validCount}")
+    print(f"Results saved to constellation_data_parallel2.csv with {len(df)} rows")
 
 
 if __name__ == "__main__":
     ok.initVM()
     setup_orekit_curdir(from_pip_library=True)
 
-    xlsx = clean_path(r"C:\Users\natha\OneDrive - Virginia Tech\Tabor, Andrew's files - RASCAL_MarsPNT_1\AHP and VSD Spreadsheets for Project\NEW AHP and VSD.xlsx")
-    sheet = "Constellation Options"
-    cell_range = "A3:G14"
+    xlsx = clean_path(r"C:\Users\natha\OneDrive - Virginia Tech\Tabor, Andrew's files - RASCAL_MarsPNT_1\AHP and VSD Spreadsheets for Project\Final Fall AHP and VSD.xlsx")
+    sheet = "Constellation Selection"
+    cell_range = "C18:I29"
 
     # Argparse --sweep, --excel
     parser = argparse.ArgumentParser(description="Run PNT VSD analysis.")
@@ -576,7 +610,7 @@ if __name__ == "__main__":
     elif args.parallel:
         runSweepAnalysis_parallel()
     else:
-        print("Please specify either --sweep or --excel to run the desired analysis.")
+        print("Please specify either --sweep or --excel or --parallel to run the desired analysis.")
 
     
     

@@ -113,7 +113,7 @@ def plot_across_mars_path(constellation,
     Z = R * np.sin(lat_grid)
 
     if mars_texture_path is not None:
-        img = plt.imread(mars_texture_path)
+        img = load_mars_basemap(mars_texture_path)
         h, w = img.shape[:2]
         u = (lon_grid + np.pi) / (2 * np.pi) * (w - 1)
         v = (np.pi / 2 - lat_grid) / np.pi * (h - 1)
