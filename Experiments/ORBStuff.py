@@ -31,7 +31,7 @@ def ORB():
     # Match descriptors.
     matches = bf.match(desQuery,desTrain)
  
-    # Sort them in the order of their distance.
+    # Sort them in the order of their distance
     matches = sorted(matches, key = lambda x:x.distance)
  
     # Draw first 10 matches.
