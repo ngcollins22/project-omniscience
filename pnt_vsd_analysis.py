@@ -171,13 +171,15 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
                     planes_by_sat_count[numSats] = d
             #print(planes_by_sat_count)
             #calculate minimum satellites for global coverage
-            minSatsForGlobal, c2 = findMinSatsForGlobal(constellation, times, planes_by_sat_count, minimumSats=int(cfg.total_sats/5), maxSats=cfg.total_sats)
+            minSatsForGlobal, c2 = findMinSatsForGlobal(constellation, times, planes_by_sat_count, minimumSats=int(cfg.total_sats/5), maxSats=0) #set max to 0 to skip, otherwise cfg.total_sat
             if c2:
                 additionalConstString = str("i="+str(c2.inclination_deg)+":" + str(c2.total_sats)+"/"+str(c2.planes)+"/"+str(c2.phasing)+" alt="+str(c2.altitude_km))
                 upgradeCost = calculateConstellationCost(c2.planes, c2.total_sats)
             else:
                 additionalConstString = "None"
                 upgradeCost=0
+
+            print("constellation" + cfg.name + "meets 5 sat requirement: " + str(constellation_meets_5sat_requirement(constellation)))
 
             print("Upgrade constellation: " + additionalConstString + " costs: " + str(upgradeCost))
 
@@ -209,21 +211,21 @@ def run_analysis(xlsx, sheet, cell_range): # saves plots and prints results, doe
             })
 
 
-def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
+def runSweepAnalysis(altRange = [8000, 11000], maxSatsInput = 25):
     starttime = time.time()
     maxAlt = altRange[1]
     currAlt = altRange[0]
 
     duration_sec = 24 * 3600      # 24 hours
-    step_sec = 300*6               # 30 min
+    step_sec = 3600               # 60 min
 
-    # precompute possible planes so it isn't done every iteration
+    # Precompute possible planes so it isn't done every iteration
     planes_by_sat_count = {}
-    for numSats in range(1, maxSatsInput):
+    for numSats in range(1, maxSatsInput+1):
         d = divisors(numSats)
         d = [p for p in d if p <= 6]
         if d:
-            planes_by_sat_count[numSats] = d
+            planes_by_sat_count[numSats] = d        
     
 
     with open('constellation_data_sweep.csv', 'w', newline='') as csvfile:
@@ -253,6 +255,7 @@ def runSweepAnalysis(altRange = [8000, 21000], maxSatsInput = 25):
                     planes = [p for p in planes if p != 1]
                     if not planes:
                         continue
+                    
                     
                     for numPlanes in planes:
                         for f in range(0, (numPlanes)):
@@ -495,11 +498,11 @@ def _evaluate_constellation_task(task):
         'upgrade_cost': upgradeCost,
     }
 
-def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_workers=None):
+def runSweepAnalysis_parallel(altRange = [8000, 23000], maxSatsInput = 27, max_workers=10):
     starttime = time.time()
 
     duration_sec = 24 * 3600      # 24 hours
-    step_sec = 300            # 5 min
+    step_sec = 300*12            # 60 min
 
     # Precompute possible planes so it isn't done every iteration
     planes_by_sat_count = {}
@@ -513,7 +516,7 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
     tasks = []
     attemptCount = 0
 
-    for currAlt in range(altRange[0], altRange[1], 500):
+    for currAlt in range(altRange[0], altRange[1], 1000):
         if currAlt < 14000:
             minSats = 16
             maxSats = maxSatsInput
@@ -521,7 +524,7 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
             minSats = 14
             maxSats = 22
 
-        for inc in range(20, 60, 5):
+        for inc in range(15, 60, 5):
             for numSats in range(minSats, maxSats + 1):
                 planes = planes_by_sat_count.get(numSats)
                 planes = [p for p in planes if p != 1]
@@ -590,8 +593,6 @@ def runSweepAnalysis_parallel(altRange = [8000, 21000], maxSatsInput = 25, max_w
         elapsedTime = (endtime - starttime) / 60.0
         print(f"Execution time: {elapsedTime:.2f} minutes, valid constellations: {validCount}")
 
-def additionalCostForGlobalCalc():
-    print()
 
 if __name__ == "__main__":
     ok.initVM()
@@ -601,7 +602,7 @@ if __name__ == "__main__":
     sheet = "Constellation Options"
     cell_range = "A3:G14"
 
-    # Argparse --sweep, --excel
+    # Argparse --sweep, --excel, --parallel
     parser = argparse.ArgumentParser(description="Run PNT VSD analysis.")
     parser.add_argument("--sweep", action="store_true", help="Run sweep analysis")
     parser.add_argument("--excel", action="store_true", help="Run Excel analysis")
