@@ -219,13 +219,13 @@ def runSweepAnalysis(altRange = [8000, 11000], maxSatsInput = 25):
     duration_sec = 24 * 3600      # 24 hours
     step_sec = 3600               # 60 min
 
-    # precompute possible planes so it isn't done every iteration
+    # Precompute possible planes so it isn't done every iteration
     planes_by_sat_count = {}
-    for numSats in range(1, maxSatsInput):
+    for numSats in range(1, maxSatsInput+1):
         d = divisors(numSats)
         d = [p for p in d if p <= 6]
         if d:
-            planes_by_sat_count[numSats] = d
+            planes_by_sat_count[numSats] = d        
     
 
     with open('constellation_data_sweep.csv', 'w', newline='') as csvfile:
@@ -255,6 +255,7 @@ def runSweepAnalysis(altRange = [8000, 11000], maxSatsInput = 25):
                     planes = [p for p in planes if p != 1]
                     if not planes:
                         continue
+                    
                     
                     for numPlanes in planes:
                         for f in range(0, (numPlanes)):
