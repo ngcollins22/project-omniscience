@@ -1,0 +1,3 @@
+[submodule "Experiments/tau-lidar-camera"]
+	path = Experiments/tau-lidar-camera
+	url = https://github.com/OnionIoT/tau-lidar-camera.git
