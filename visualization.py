@@ -5,10 +5,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 
-from org.orekit.utils import PVCoordinates
-from org.orekit.bodies import GeodeticPoint
-from mars_constellation import Constellation
-from org.orekit.time import AbsoluteDate
+from org.orekit.utils import *
+from org.orekit.bodies import *
+from mars_constellation import *
+from org.orekit.time import *
 
 from matplotlib import cm
 
