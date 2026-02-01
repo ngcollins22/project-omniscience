@@ -146,7 +146,7 @@ def getPosePixelCords(img1,numfeatures=50000) -> tuple[list, list]:
 
     return [[cx,cy], [refWidth, refHeight]]
 
-def syntheticExperiment():
+def simulatedExperiment():
     root = os.getcwd()
     img2Path = os.path.join(root, "mars_4k_color.jpg") #training image
 
@@ -168,9 +168,13 @@ def syntheticExperiment():
         Xleft = int(xi-L)
         Xright = int(xi+L)
         if Yhigh<0: Yhigh=int(0)
-        if Ylow>refHeight: Ylow = int(refHeight-1)
-        if Xleft<0: Xleft = int(0)
-        if Xright>refWidth: Xright = int(refWidth-1)
+        if Ylow>refHeight: Ylow = int(refHeight)
+        if Xleft<0:
+            Xright = int(Xright-np.abs(Xleft))
+            Xleft = 0
+        if Xright>refWidth:
+            Xleft = Xleft + (Xright-refWidth)
+            Xright = refWidth
 
         croppedImage = img2[Yhigh:Ylow, Xleft:Xright]
         (center, refRes) = getPosePixelCords(croppedImage, numfeatures=50000)
@@ -178,14 +182,16 @@ def syntheticExperiment():
         print(len(centerHistory))
 
     plt.figure()
+    img2 = cv.imread(img2Path, cv.IMREAD_COLOR)
+    img2 = cv.cvtColor(img2, cv.COLOR_BGR2RGB)
     plt.imshow(img2)
-    plt.gca().invert_yaxis()
-    plt.plot(x,y)
+
+    plt.plot(x,y, color='green')
 
     centers = np.array(centerHistory, dtype=float) 
     cx = centers[:, 0]
     cy = centers[:, 1]
-    plt.plot(cx,cy)
+    plt.plot(cx,cy, 'r.-',  markersize=4)
     plt.show()
 
 
@@ -198,4 +204,4 @@ def syntheticExperiment():
 if __name__ == '__main__':
     #ORB()
     #print(getPosePixelCords("mars_cropped_4k_1.jpg"))
-    syntheticExperiment()
+    simulatedExperiment()
