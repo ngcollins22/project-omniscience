@@ -12,8 +12,8 @@ import os
 
 def ORB():
     root = os.getcwd()
-    img1Path = os.path.join(root, "../mars_cropped_4k_1.jpg") #query image
-    img2Path = os.path.join(root, "../mars_4k_color.jpg") #training image
+    img1Path = os.path.join(root, "mars_cropped_4k_1.jpg") #query image
+    img2Path = os.path.join(root, "mars_4k_color.jpg") #training image
     #download image here https://planetpixelemporium.com/mars5672.html#
     #crop it for the query
     # Seems to work best when the resolution of both images are the same, so we need to use 4k i think to match arducam
@@ -86,5 +86,122 @@ def ORB():
         plt.imshow(kpPlotImg)
         plt.show() 
 
+
+"""simple function that takes in a query image and returns the center of where it is in the hardcoded reference image
+return: a tuple containing first a list of the pixel cords of the center of the query image, and second the resolution
+ of the reference image so another function can use that info to convert the scale"""
+def getPosePixelCords(img1,numfeatures=50000) -> tuple[list, list]:
+    root = os.getcwd()
+    #img1Path = os.path.join(root, queryImageFilePath) #query image
+    img2Path = os.path.join(root, "mars_4k_color.jpg") #training image
+    #download image here https://planetpixelemporium.com/mars5672.html#
+
+    # load images
+    #img1 = cv.imread(img1Path, cv.IMREAD_GRAYSCALE) #query: This is what we are trying to match to the map
+    img2 = cv.imread(img2Path, cv.IMREAD_GRAYSCALE) #Reference or Training: This is the perfect entire map
+    refHeight, refWidth = img2.shape
+
+    #initiate orb
+    orb = cv.ORB_create(nfeatures=numfeatures) #increasing number of keypoints from default
+
+    # get keypoints and descriptors for each image
+    kp1, des1 = orb.detectAndCompute(img1,None)
+    kp2, des2 = orb.detectAndCompute(img2, None)
+
+    # create BFMatcher (Brute Force Matcher) object
+    bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=False) 
+
+    # get matches using knn matching. finds the k best matches per keypoint and the filter below only keeps the 
+    # match if the 1st best match is significantly better than the 2nd best match
+    # Was previously  using:  matches = bf.match(des1,des2) and no filter
+    knn = bf.knnMatch(des1, des2, k=2) 
+    good = []
+    for pair in knn:
+        if len(pair) < 2:
+            continue
+        m, n = pair
+        if m.distance < 0.7 * n.distance:
+            good.append(m)
+
+    # Using homography
+    if len(good)>10:
+        src_pts = np.float32([ kp1[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
+        dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
+ 
+        M, mask = cv.findHomography(src_pts, dst_pts, cv.RANSAC,5.0)
+        matchesMask = mask.ravel().tolist()
+ 
+        h,w = img1.shape
+        pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
+        dst = cv.perspectiveTransform(pts,M)
+        #get center of rectangle which is where the camera would be under ideal conditions
+        pts = dst.reshape(-1, 2)
+        center = pts.mean(axis=0)
+        cx, cy = center
+    else:
+        print( "Not enough matches are found - {}/{}".format(len(good), 10) )
+        matchesMask = None
+        return   [[np.nan,np.nan], [refWidth, refHeight]]
+    
+
+    return [[cx,cy], [refWidth, refHeight]]
+
+def simulatedExperiment():
+    root = os.getcwd()
+    img2Path = os.path.join(root, "mars_4k_color.jpg") #training image
+
+    # load images
+    img2 = cv.imread(img2Path, cv.IMREAD_GRAYSCALE)
+
+    #REPLACE WITH GROUND TRACK CORDS LATER
+    refHeight, refWidth = img2.shape
+    x=np.arange(1,refWidth, 10)
+    y = np.round(refHeight/4 * np.sin(x*np.pi/180)+refHeight/2)
+
+    L = 300
+    centerHistory=[]
+    for xi, yi in zip(x, y):
+        
+        # syntax is img[startY:endY, startX:endX]
+        Yhigh = int(yi-L)
+        Ylow = int(yi+L)
+        Xleft = int(xi-L)
+        Xright = int(xi+L)
+        if Yhigh<0: Yhigh=int(0)
+        if Ylow>refHeight: Ylow = int(refHeight)
+        if Xleft<0:
+            Xright = int(Xright-np.abs(Xleft))
+            Xleft = 0
+        if Xright>refWidth:
+            Xleft = Xleft + (Xright-refWidth)
+            Xright = refWidth
+
+        croppedImage = img2[Yhigh:Ylow, Xleft:Xright]
+        (center, refRes) = getPosePixelCords(croppedImage, numfeatures=50000)
+        centerHistory.append(center)
+        print(len(centerHistory))
+
+    plt.figure()
+    img2 = cv.imread(img2Path, cv.IMREAD_COLOR)
+    img2 = cv.cvtColor(img2, cv.COLOR_BGR2RGB)
+    plt.imshow(img2)
+
+    plt.plot(x,y, color='green')
+
+    centers = np.array(centerHistory, dtype=float) 
+    cx = centers[:, 0]
+    cy = centers[:, 1]
+    plt.plot(cx,cy, 'r.-',  markersize=4)
+    plt.show()
+
+
+
+
+
+
+    
+
 if __name__ == '__main__':
-    ORB()
+    #ORB()
+    #print(getPosePixelCords("mars_cropped_4k_1.jpg"))
+    simulatedExperiment()
