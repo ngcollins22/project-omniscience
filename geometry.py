@@ -2,6 +2,8 @@
 
 import math
 from dataclasses import dataclass
+import itertools
+import heapq
 
 import orekit
 orekit.initVM()
@@ -329,7 +331,7 @@ def compute_network_metrics(latency_tensor: np.ndarray) -> Tuple[float, float, f
     """
         Compute:
         - number_of_links
-        - redundancy
+    - redundancy (fraction of links beyond a spanning tree; negative means insufficient links)
         - degree_per_node
         - density_per_node
         - average_clustering_coefficient
@@ -345,7 +347,9 @@ def compute_network_metrics(latency_tensor: np.ndarray) -> Tuple[float, float, f
 
     nt = adjacency_matrix.shape[0]
 
-    min_links = n_nodes - 1
+    min_links = max(n_nodes - 1, 0)
+    max_links = n_nodes * (n_nodes - 1) / 2
+    max_redundant_links = max(max_links - min_links, 1)
 
     clustering_coeffs = np.zeros(nt, dtype=float) # one for each timestep
     #possible_links = np.zeros(nt, dtype=float) # one for each timestep
@@ -359,10 +363,13 @@ def compute_network_metrics(latency_tensor: np.ndarray) -> Tuple[float, float, f
         adjacency_matrix_instant = adjacency_matrix[i] # grab the NxN matrix at time i
 
         number_of_links[i] = np.nansum(adjacency_matrix_instant) / 2  # undirected graph
-        redundancies[i] = number_of_links[i] - min_links
+
+        # Fraction of links beyond the minimum needed for connectivity (spanning tree)
+        raw_redundancy = number_of_links[i] - min_links
+        redundancies[i] = raw_redundancy / max_redundant_links
 
         average_degrees[i] = np.nanmean(np.nansum(adjacency_matrix_instant, axis=0))
-        densities[i] = average_degrees[i] / (n_nodes - 1)
+        densities[i] = average_degrees[i] / (n_nodes - 1) if n_nodes > 1 else 0.0
 
         # Clustering coefficient
         clustering_coeffs_instant = np.zeros(n_nodes, dtype=float)
@@ -574,3 +581,183 @@ def compute_across_mars_latency(
     return total_latency, path, path_latencies
 
     
+def dop_from_unit_los(unit_los: np.ndarray, max_cond: float = 1e10):
+    """
+    unit_los: (m,3) array of unit vectors from user -> sat for the sats used at this epoch.
+              Must have m >= 4 for full 3D+clock solution.
+    Returns: (pdop, hdop) or (np.nan, np.nan) if singular/bad geometry.
+    """
+    m = unit_los.shape[0]
+    if m < 4:
+        return np.nan, np.nan
+
+    H = np.ones((m, 4), dtype=float)
+    H[:, 0:3] = unit_los
+
+    HT_H = H.T @ H
+    if np.linalg.cond(HT_H) > max_cond:
+        return np.nan, np.nan
+
+    try:
+        Q = np.linalg.inv(HT_H)
+    except np.linalg.LinAlgError:
+        return np.nan, np.nan
+
+    pdop = float(np.sqrt(Q[0,0] + Q[1,1] + Q[2,2]))
+    hdop = float(np.sqrt(Q[0,0] + Q[1,1]))
+    return pdop, hdop
+
+
+import math
+import numpy as np
+from org.orekit.bodies import GeodeticPoint
+from org.orekit.frames import TopocentricFrame
+
+def precompute_site_geometry(constellation,
+                             times,
+                             inertial_pvs,   # dict[sat_id] -> list[PVCoordinates] in inertial frame
+                             sat_ids,        # list of sat_ids in the order you want
+                             sites_deg,      # list[(lat_deg, lon_deg, alt_m)]
+                             min_elev_deg=10.0):
+    """
+    Returns:
+      visible: bool array (S, T, N)
+      uvec:    float array (S, T, N, 3) unit vectors user->sat (in inertial frame)
+    """
+    mars_shape = constellation.mars_shape
+    body = constellation.mars_fixed
+    inertial = constellation.mars_inertial
+
+    S = len(sites_deg)
+    T = len(times)
+    N = len(sat_ids)
+
+    min_elev_rad = math.radians(min_elev_deg)
+
+    # Build topo frames and store geodetic points
+    topo_frames = []
+    gpoints = []
+    for (lat_deg, lon_deg, alt_m) in sites_deg:
+        gp = GeodeticPoint(math.radians(lat_deg), math.radians(lon_deg), float(alt_m))
+        topo = TopocentricFrame(mars_shape, gp, "site")
+        topo_frames.append(topo)
+        gpoints.append(gp)
+
+    visible = np.zeros((S, T, N), dtype=bool)
+    uvec = np.zeros((S, T, N, 3), dtype=float)
+
+    for t_idx, date in enumerate(times):
+        # body-fixed -> inertial (static transform for positions at this date)
+        body_to_inertial = body.getTransformTo(inertial, date).toStaticTransform()
+
+        # User positions in inertial for each site at this time
+        r_user = []
+        for gp in gpoints:
+            # position of site in body-fixed:
+            r_bf = mars_shape.transform(gp)     # Vector3D in body frame
+            # convert to inertial:
+            r_i = body_to_inertial.transformPosition(r_bf)
+            r_user.append(np.array([r_i.getX(), r_i.getY(), r_i.getZ()], dtype=float))
+        r_user = np.stack(r_user, axis=0)  # (S,3)
+
+        # Satellite positions in inertial at this time
+        r_sat = np.zeros((N, 3), dtype=float)
+        for j, sid in enumerate(sat_ids):
+            pv = inertial_pvs[sid][t_idx]
+            p = pv.getPosition()
+            r_sat[j, :] = [p.getX(), p.getY(), p.getZ()]
+
+        # Elevation test using topo frame (needs sat position + frame + date)
+        # And unit LOS (user->sat)
+        for s in range(S):
+            topo = topo_frames[s]
+            ru = r_user[s]
+            for j, sid in enumerate(sat_ids):
+                pv = inertial_pvs[sid][t_idx]
+                pos = pv.getPosition()
+                elev = topo.getElevation(pos, inertial, date)  # rad
+
+                if elev >= min_elev_rad:
+                    visible[s, t_idx, j] = True
+                    d = r_sat[j] - ru
+                    n = np.linalg.norm(d)
+                    if n > 0:
+                        uvec[s, t_idx, j, :] = d / n
+
+    return visible, uvec
+
+
+def evaluate_subset(subset_indices,  # list of 4 indices into sat_ids
+                    visible, uvec,
+                    max_cond=1e10):
+    """
+    visible: (S,T,N), uvec: (S,T,N,3)
+    Returns per site:
+      outage_frac, hdop_series, pdop_series, hdop_p95, pdop_p95
+    """
+    S, T, N = visible.shape
+    subset_indices = np.array(subset_indices, dtype=int)
+
+    results = []
+    for s in range(S):
+        hdop = np.full(T, np.nan, dtype=float)
+        pdop = np.full(T, np.nan, dtype=float)
+
+        for t in range(T):
+            vis_mask = visible[s, t, subset_indices]
+            if np.count_nonzero(vis_mask) < 4:
+                continue
+            unit_los = uvec[s, t, subset_indices, :]
+
+            # all 4 must be visible (mask already ensures that)
+            p, h = dop_from_unit_los(unit_los, max_cond=max_cond)
+            pdop[t] = p
+            hdop[t] = h
+
+        valid = ~np.isnan(hdop)
+        outage = 1.0 - np.mean(valid)
+        if np.any(valid):
+            hdop_p95 = float(np.percentile(hdop[valid], 95))
+            pdop_p95 = float(np.percentile(pdop[valid], 95))
+        else:
+            hdop_p95 = float("inf")
+            pdop_p95 = float("inf")
+
+        results.append({
+            "outage_frac": outage,
+            "hdop": hdop,
+            "pdop": pdop,
+            "hdop_p95": hdop_p95,
+            "pdop_p95": pdop_p95,
+        })
+    return results
+
+def score_subset(site_results, outage_weight=1e3):
+    worst_outage = max(r["outage_frac"] for r in site_results)
+    worst_hdop_p95 = max(r["hdop_p95"] for r in site_results)
+    return outage_weight * worst_outage + worst_hdop_p95
+
+
+def find_best_four_sats(sat_ids, visible, uvec, top_k=20):
+    """
+    Returns: list of (score, subset_indices, site_results_summary)
+    subset_indices are indices into sat_ids
+    """
+    N = len(sat_ids)
+    heap = []  # max-heap via negative score
+
+    for subset in itertools.combinations(range(N), 4):
+        site_results = evaluate_subset(subset, visible, uvec)
+        sc = score_subset(site_results)
+
+        # keep top_k smallest scores
+        if len(heap) < top_k:
+            heapq.heappush(heap, (-sc, subset, site_results))
+        else:
+            if sc < -heap[0][0]:
+                heapq.heapreplace(heap, (-sc, subset, site_results))
+
+    # return sorted best
+    best = [(-h[0], h[1], h[2]) for h in heap]
+    best.sort(key=lambda x: x[0])
+    return best
