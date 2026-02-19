@@ -9,13 +9,15 @@ def cpd(initial,satnum,lc):
 def launch_cost(satnum,relaynum):
     launchnum_mars = math.ceil(satnum/4)
     launchnum_relay = math.ceil(relaynum/4)
-    return (launchnum_mars + launchnum_relay)*150
+    return (launchnum_mars + launchnum_relay + 1)*150 #Add one for lunar launch
 #payloads: 4 solar, 10 comms, 10 PNT
 def payload(STCarray: np.array,lc):
-    c1_s = 0.6*STCarray[0,0]**0.8
-    c1_t = 0.6*STCarray[1,0]**0.8
-    c1_c = 0.6*STCarray[2,0]**0.8
+    c1_s = 0.6*(STCarray[0,0]**0.8)
+    c1_t = 0.6*(STCarray[1,0]**0.8)
+    c1_c = 0.6*(STCarray[2,0]**0.8)
     solarcost, _ = cpd(c1_s,STCarray[0,1],lc)
     terraincost, _ = cpd(c1_t,STCarray[1,1],lc)
     commscost, _ = cpd(c1_c,STCarray[2,1],lc)
-    return solarcost+terraincost+commscost
+    return c1_s*solarcost+c1_t*terraincost+c1_c*commscost
+#15 telescopes, start out with 3
+#3 ground stations, 5 telescopes each
