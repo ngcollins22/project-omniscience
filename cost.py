@@ -19,7 +19,7 @@ def omnicost(drymass: int,satnum_mars: int,satnum_relay: int,lifetime: int,paylo
     cost_GS = 20*gs_num
 
     #Major cost sectors
-    dev_c = cost_bustot + cost_payload + cost_it
+    dev_c = cost_bustot + cost_payload + cost_it + cost_GS
     launchcost = launch_cost(satnum_mars,satnum_relay)
     k = np.size(payloads)**0.25 #varies based on number of payloads (Solar EWS, PNT, comms)
     opcost = 1.2*np.sqrt(drymass)*((satnum_mars+satnum_relay)**lc)*k
@@ -33,7 +33,7 @@ lifetime = 25       #years
 payloads = np.array(([65,4],[90,10],[190,10]))
 gs_num = 15
 totalcost, dev_c, launchcost, opcost = omnicost(drymass,satnum_mars,satnum_relay,lifetime,payloads,gs_num)
-print(totalcost)
-print(dev_c)
-print(launchcost)
-print(opcost*lifetime)
+print(f'Total lifetime cost ($M): {totalcost:.3f}')
+print(f'Mission developmental costs ($M): {dev_c:.3f}')
+print(f'Total launch cost aboard Falcon Heavy ($M): {launchcost:.3f}')
+print(f'Mission operational costs over {lifetime} years ($M): {opcost*lifetime:.3f}')
