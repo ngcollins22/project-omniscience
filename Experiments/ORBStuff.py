@@ -1,7 +1,9 @@
 import cv2 as cv
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import numpy as np
 import os 
+import time
 
 # Code largely sourced from https://docs.opencv.org/4.x/d1/d89/tutorial_py_orb.html,  https://docs.opencv.org/4.x/dc/dc3/tutorial_py_matcher.html, 
 # and https://docs.opencv.org/4.x/d1/de0/tutorial_py_feature_homography.html
@@ -91,6 +93,7 @@ def ORB():
 return: a tuple containing first a list of the pixel cords of the center of the query image, and second the resolution
  of the reference image so another function can use that info to convert the scale"""
 def getPosePixelCords(img1,numfeatures=50000) -> tuple[list, list]:
+    #start = time.time()
     root = os.getcwd()
     #img1Path = os.path.join(root, queryImageFilePath) #query image
     img2Path = os.path.join(root, "mars_4k_color.jpg") #training image
@@ -124,7 +127,7 @@ def getPosePixelCords(img1,numfeatures=50000) -> tuple[list, list]:
             good.append(m)
 
     # Using homography
-    if len(good)>10:
+    if len(good)>6:
         src_pts = np.float32([ kp1[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
         dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
  
@@ -143,7 +146,9 @@ def getPosePixelCords(img1,numfeatures=50000) -> tuple[list, list]:
         matchesMask = None
         return   [[np.nan,np.nan], [refWidth, refHeight]]
     
-
+    #stop = time.time()
+    #elapsed = stop-start
+    #print("elapsed time: " + str(elapsed))
     return [[cx,cy], [refWidth, refHeight]]
 
 def simulatedExperiment():
@@ -155,11 +160,22 @@ def simulatedExperiment():
 
     #REPLACE WITH GROUND TRACK CORDS LATER
     refHeight, refWidth = img2.shape
-    x=np.arange(1,refWidth, 10)
-    y = np.round(refHeight/4 * np.sin(x*np.pi/180)+refHeight/2)
 
-    L = 300
+    lon = np.array([12.953019303288272, 16.074598439627454, 19.886279227577894, 25.14641715819138, 32.66120938544461, 42.98064727347229, 55.64868716852323, 68.72627198552846, 79.95562364262398, 88.37620856286688, 94.30154842244991, 98.50805239009397, 101.78096268082827, 104.82747761829593, 108.32880740455279, 113.01575767098646, 119.6928123551966, 129.05791217032754, 141.08912679796524, 154.30776871834547, 166.34220974638146, 175.71153864122613, -172.91860854926836, -169.4160902737511, -166.36940981131315, -163.09733706143405, -158.8927652003549, -152.97056008300348, -144.55408743153387, -133.32856607396005, -120.25221979921726, -107.58183625569244, -97.25824617066145, -89.73959384094677, -84.47672388447145, -80.66348970907254, -77.54141168200931, -74.42032995383057, -70.61020090892474, -65.35279320985812, -57.84185974391276, -47.5265749004606, -34.86088310263406, -21.782065011932282, -10.548885087017851, -2.124187042069613, 3.8042893204901986, 8.012727105810232]) #
+    lat = np.array([0.0, 10.294272932758956, 20.229582627857596, 29.367775107073633, 37.10643037065057, 42.628322369659436, 45.03715315047806, 43.817678288053095, 39.2420082806592, 32.142771222150316, 23.394353056120405, 13.670060408742872, 3.453488764018771, -6.879124038757107, -16.977353539563314, -26.438767988466793, -34.72492550380004, -41.08896303272316, -44.625362214642045, -44.628069893989036, -41.09647323585738, -34.735919972591915, -16.99186388850632, -6.894253544906227, 3.4382748595245154, 13.655278059914894, 23.380614021078312, 32.130909150700944, 39.233179799059656, 43.81324547712269, 45.03806161395708, 42.63436019720406, 37.11641518868723, 29.380372383101253, 20.24374726718599, 10.30925940310373, 0.015241728321373573, -10.279285698209046, -20.215416290406793, -29.35517483969081, -37.09644077122126, -42.622277725506194, -45.03623665686413, -43.82210371410697, -39.25083129393322, -32.15462976072552, -23.408090010845466, -13.684841709460322]) #
+    degreetopix = refWidth/360
+    lon = (lon + 180)*degreetopix
+    lat = -(lat)*degreetopix + refHeight/2
+    p = lon.argsort() #sort lon so it graphs right
+    x=lon[p].astype(int)
+    y=lat[p].astype(int)
+    # x = np.arange(refWidth/4,refWidth*3/4, 50)
+    
+    # y = np.round(refHeight/4 * np.sin(x*np.pi/180 *0.2)+refHeight/2)
+    
+    L = np.round(refWidth/20)
     centerHistory=[]
+    elapsedTimeHistory=[]
     for xi, yi in zip(x, y):
         
         # syntax is img[startY:endY, startX:endX]
@@ -177,10 +193,17 @@ def simulatedExperiment():
             Xright = refWidth
 
         croppedImage = img2[Yhigh:Ylow, Xleft:Xright]
+        start = time.time()
         (center, refRes) = getPosePixelCords(croppedImage, numfeatures=50000)
+        stop = time.time()
         centerHistory.append(center)
+        elapsedTime = stop-start
+        elapsedTimeHistory.append(elapsedTime)
+
         print(len(centerHistory))
 
+    avgTimePerORB = np.mean(elapsedTimeHistory)
+    print("average elapsed time per ORB call: " + str(avgTimePerORB))
     plt.figure()
     img2 = cv.imread(img2Path, cv.IMREAD_COLOR)
     img2 = cv.cvtColor(img2, cv.COLOR_BGR2RGB)
@@ -192,8 +215,25 @@ def simulatedExperiment():
     cx = centers[:, 0]
     cy = centers[:, 1]
     plt.plot(cx,cy, 'r.-',  markersize=4)
+    plt.legend(["True", "Estimated"])
+    plt.xlabel("Horizontal Pixel Index (Proportional to Longitude)")
+    plt.ylabel("Vertical Pixel Index (Proportional to Latitude)")
+    plt.title("Simulated ORB Experiment")
+
+    toggleRectangles = True
+    if toggleRectangles:
+        ax = plt.gca()
+        for i in range(0, len(cx)):
+            rect = patches.Rectangle((x[i]-L/2, y[i]-L/2), L, L, linewidth=1, edgecolor='b', facecolor='none')
+
+            # Add the patch to the Axes
+            ax.add_patch(rect)
+
     plt.show()
 
+    #calculate error
+    err = np.mean(np.sqrt((x-cx)**2 + (y-cy)**2))
+    print(err)
 
 
 
