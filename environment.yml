@@ -16,3 +16,6 @@ dependencies:
       - git+https://gitlab.orekit.org/orekit/orekit-data.git
       - openpyxl
       - casadi
+      - TauLidarCamera
+  - websockets==11.0.3
+      - pillow

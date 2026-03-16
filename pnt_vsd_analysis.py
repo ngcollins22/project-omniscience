@@ -18,7 +18,7 @@ def generate_sat_configs_from_df(df) -> List[ConstellationConfig]:
     for _, row in df.iterrows():
         cfg = ConstellationConfig(
             name = str(row['Constellation']),
-            inclination_deg=float(row['i0']),
+            inclination_deg=float(row['i']),
             total_sats=int(row['t']),
             planes=int(row['p']),
             phasing=int(row['f']),
@@ -598,9 +598,9 @@ if __name__ == "__main__":
     ok.initVM()
     setup_orekit_curdir(from_pip_library=True)
     #C:\Users\natha\OneDrive - Virginia Tech\Tabor, Andrew's files - RASCAL_MarsPNT_1\AHP and VSD Spreadsheets for Project\NEW AHP and VSD.xlsx"
-    xlsx = clean_path(r"C:\Users\awt\Downloads\NEWAHPandVSDlocal.xlsx")
-    sheet = "Constellation Options"
-    cell_range = "A3:G14"
+    xlsx = clean_path(r"C:\Users\natha\OneDrive - Virginia Tech\Tabor, Andrew's files - RASCAL_MarsPNT_1\AHP and VSD Spreadsheets for Project\Spring AHP and VSD.xlsx")
+    sheet = "Constellation Selection"
+    cell_range = "B47:G60"
 
     # Argparse --sweep, --excel, --parallel
     parser = argparse.ArgumentParser(description="Run PNT VSD analysis.")

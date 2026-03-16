@@ -5,3 +5,12 @@ download.xml
 mars_viking_full.jpg
 __pycache__/
 *.asv
+*.tif
+*.xml
+*.msk
+*.log
+*.map
+*.zip
+*.csv
+*.env
+results/*

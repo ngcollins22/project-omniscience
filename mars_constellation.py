@@ -348,7 +348,6 @@ def compute_pdop_p95_map(constellation,
     # Pre-create DOPComputers for each grid point
     dop_computers: Dict[Tuple[int, int], DOPComputer] = {}
 
-
     min_elev_rad = math.radians(min_elev_deg)
 
     for i_lat, lat_deg in enumerate(lat_vals):
