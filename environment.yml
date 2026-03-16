@@ -17,3 +17,5 @@ dependencies:
       - openpyxl
       - casadi
       - TauLidarCamera
+  - websockets==11.0.3
+      - pillow

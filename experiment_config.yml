@@ -1,0 +1,102 @@
+# OMNIScience Experiment Configuration
+# All physical units are SI unless a suffix says otherwise (mm, deg, etc.)
+# Fill in all ?? before running. Values without ?? are known defaults.
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  dem_geotiff:       ??            # absolute or repo-relative path to MOLA .tif
+  results_dir:       results/
+  scans_dir:         results/scans/
+  ground_tracks_dir: results/ground_tracks/
+
+# ── MOLA DEM (raw dataset properties) ────────────────────────────────────────
+dem:
+  meters_per_pixel: 463            # native MOLA global map resolution
+  region:                          # lat/lon bounding box of the patch used for the print
+    lat_min_deg: ??
+    lat_max_deg: ??
+    lon_min_deg: ??
+    lon_max_deg: ??
+  uncertainties:                   # intrinsic MOLA instrument accuracy
+    horizontal_position_m: 100.0
+    radius_m:              1.0
+    elevation_m:           3.0
+    areoid_m:              1.8
+
+# ── 3D Print ──────────────────────────────────────────────────────────────────
+print:
+  width_mm:              800.0
+  height_mm:              400.0
+  base_thickness_mm:       5      # thickness of the flat base below terrain
+  vertical_exaggeration:   40      # elevation scale factor applied when slicing the print
+                                   # (real Mars = 1.0; higher = more pronounced relief)
+
+# ── Gantry ────────────────────────────────────────────────────────────────────
+gantry:
+  serial_port:          COM8         # e.g. COM3, /dev/ttyUSB0
+  baud_rate:            115200
+  travel_x_mm:          400         # full usable X travel of the gantry
+  travel_y_mm:          800         # full usable Y travel of the gantry
+  travel_z_mm:          60         # full usable Z travel
+  max_speed_mm_s:       ??
+  # Nominal camera altitude above the print surface (Z axis).
+  # Overridden per-run but stored here as the reference value.
+  camera_altitude_mm:   100.0
+  # Fixed heading for the toy problem (degrees, 0 = gantry +X direction)
+  heading_deg:          0.0
+  # Rigid offset from the gantry head reference point to the Tau sensor center.
+  # Measure with calipers; leave 0 until calibrated.
+  rs_offset_x_mm:       0.0
+  rs_offset_y_mm:       0.0
+  rs_offset_z_mm:       0.0
+
+# ── Intel RealSense D435 ──────────────────────────────────────────────────────
+realsense_sensor:
+  # Sensor geometry (D435 depth module)
+  resolution_x:          640
+  resolution_y:          480
+  fps:                   30
+  fov_x_deg:             87.0   # horizontal full-angle FOV (D435 spec ±3°)
+  fov_y_deg:             58.0   # vertical full-angle FOV (D435 spec ±1°)
+  min_range_mm:          280    # D435 hardware minimum reliable depth
+  max_range_mm:          10000  # D435 maximum reliable depth
+  # Emitter / exposure (overridden via GUI Settings panel before a run)
+  enable_emitter:        true
+  emitter_power:         150    # 0–360 (SDK units; 150 is ~42% power)
+  exposure_us:           0      # 0 = auto-exposure; otherwise manual µs value
+  # Noise model for simulation
+  range_noise_sigma_mm:  ??     # 1-sigma Gaussian noise on each range return
+  dropout_probability:   ??     # per-pixel probability of a missing return
+  systematic_bias_mm:    0.0    # any known constant range offset
+  # Projection / patch output
+  output_grid_res_mm:    1.0    # spatial resolution of elevation patch (mm/cell)
+  smoothing_sigma_mm:    2.0    # Gaussian smoothing sigma applied after binning
+
+# ── ArduCam (RGB camera) ──────────────────────────────────────────────────────
+arducam:
+  camera_index:    0
+  resolution_x:    ??
+  resolution_y:    ??
+  fov_x_deg:       ??
+  fov_y_deg:       ??
+  # Offset from gantry head to ArduCam principal point (when mounted instead of Tau)
+  offset_x_mm:     ??
+  offset_y_mm:     ??
+  offset_z_mm:     ??
+  # Noise model for simulation
+  noise_sigma:     ??              # pixel intensity noise std dev (0–255 scale)
+
+# ── Simulation ────────────────────────────────────────────────────────────────
+simulation:
+  random_seed:            42       # set for reproducibility; null for random
+  # Ground track subsampling: spatial gap between stop-and-capture positions
+  measurement_spacing_mm: ??
+  # Time scaling: ratio of simulated orbital period to real experiment duration.
+  # e.g. if a real pass takes 30 min and you run it in 10 min, this is 3.0
+  time_scale_factor:      ??
+  # Particle filter
+  n_particles:            ??
+  process_noise_x_mm:     ??       # per-step particle diffusion in X
+  process_noise_y_mm:     ??       # per-step particle diffusion in Y
+  initial_spread_x_mm:    ??       # initial particle cloud half-width in X
+  initial_spread_y_mm:    ??       # initial particle cloud half-width in Y
