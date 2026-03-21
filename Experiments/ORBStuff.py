@@ -96,7 +96,7 @@ def getPosePixelCords(img1,numfeatures=50000) -> tuple[list, list]:
     #start = time.time()
     root = os.getcwd()
     #img1Path = os.path.join(root, queryImageFilePath) #query image
-    img2Path = os.path.join(root, "mars_4k_color.jpg") #training image
+    img2Path = os.path.join(root, "Experiments/mars_4k_color.jpg") #training image
     #download image here https://planetpixelemporium.com/mars5672.html#
 
     # load images

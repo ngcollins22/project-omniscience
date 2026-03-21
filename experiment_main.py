@@ -70,12 +70,23 @@ try:
 except ImportError:
     _GT_AVAILABLE = False
 
+# ── ORBStuff import ───────────────────────────────────────────────────────────
+try:
+    from Experiments.ORBStuff import getPosePixelCords
+    _ORB_AVAILABLE = True
+except ImportError:
+    _ORB_AVAILABLE = False
+
 # ── Display constants ─────────────────────────────────────────────────────────
 RS_W         = 640   # RealSense D435 native resolution
 RS_H         = 480
 ARDUCAM_W    = 640
 ARDUCAM_H    = 480
 POLL_MS      = 50    # GUI refresh interval
+
+# ── ORB map display size ──────────────────────────────────────────────────────
+ORB_MAP_W    = 720   # width of the basemap canvas in the UI
+ORB_MAP_H    = 360   # height (2:1 matches a standard equirectangular Mars map)
 
 
 # ── Background worker: reads RealSense D435 frames off the main thread ────────
@@ -117,6 +128,41 @@ class RealSenseWorker(threading.Thread):
             except Exception as e:
                 self.frame_q.put_nowait(("error", str(e)))
                 break
+
+
+# ── Background worker: runs ORB on a single frame then signals done ───────────
+class ORBWorker(threading.Thread):
+    """
+    Receives one grayscale/BGR frame, rotates it 90° CW, calls
+    getPosePixelCords(), and puts the result onto result_q.
+
+    result_q items are either:
+        ("ok",  [cx, cy], [ref_w, ref_h])   – success
+        ("err", error_string)               – failure
+    """
+
+    def __init__(self, frame: np.ndarray, result_q: queue.Queue):
+        super().__init__(daemon=True)
+        self.frame    = frame
+        self.result_q = result_q
+
+    def run(self):
+        try:
+            # Rotate 90° clockwise: transpose then flip horizontally
+            rotated = cv2.rotate(self.frame, cv2.ROTATE_90_CLOCKWISE)
+            # getPosePixelCords expects a grayscale numpy array
+            if rotated.ndim == 3:
+                gray = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = rotated
+            result = getPosePixelCords(gray)
+            if result is None:
+                self.result_q.put_nowait(("err", "getPosePixelCords returned None"))
+                return
+            center, ref_res = result
+            self.result_q.put_nowait(("ok", center, ref_res))
+        except Exception as e:
+            self.result_q.put_nowait(("err", str(e)))
 
 
 # ── Main application ──────────────────────────────────────────────────────────
@@ -167,6 +213,28 @@ class ExperimentApp(tk.Tk):
         self._last_grayscale = None   # most-recent grayscale image (uint8, H×W)
         self._last_depth_rgb = None   # most-recent depth colormap image (uint8, H×W×3)
         self._snap_window    = None   # Toplevel for debug snapshot (replaced on each snap)
+
+        # ── ORB localization state ────────────────────────────────────────────
+        # ArduCam focus state
+        self._arducam_autofocus_var = tk.BooleanVar(value=True)
+        self._arducam_focus_var     = tk.StringVar(value="500")
+
+        self._orb_running      = False          # True while the loop is active
+        self._orb_worker       = None           # current ORBWorker thread (or None)
+        self._orb_result_q     = queue.Queue()  # ORBWorker → main thread
+        self._orb_history_map  = []             # list of (map_px_x, map_px_y) estimated positions
+        self._orb_history_gantry = []           # list of (gantry_mm_x, gantry_mm_y) ground truth
+        self._orb_ref_img_path = tk.StringVar(value="Experiments/mars_4k_color.jpg")
+        self._orb_map_photo    = None           # ImageTk reference for basemap
+        self._orb_est_lat_var  = tk.StringVar(value="—")
+        self._orb_est_lon_var  = tk.StringVar(value="—")
+        self._orb_est_gx_var   = tk.StringVar(value="—")
+        self._orb_est_gy_var   = tk.StringVar(value="—")
+        self._orb_gt_gx_var    = tk.StringVar(value="—")
+        self._orb_gt_gy_var    = tk.StringVar(value="—")
+        self._orb_status_var   = tk.StringVar(value="Idle")
+        self._orb_frame_count  = 0
+        self._orb_count_var    = tk.StringVar(value="0")
 
         # Per-device status StringVars, populated in _build_status_bar
         self._status_color: dict[str, tk.StringVar] = {}
@@ -447,9 +515,57 @@ class ExperimentApp(tk.Tk):
     # ── ArduCam tab ───────────────────────────────────────────────────────────
 
     def _tab_arducam(self) -> tk.Frame:
+        # Outer frame that goes into the notebook
         tab = tk.Frame(self._nb, bg="#1e1e2e")
+        tab.rowconfigure(0, weight=1)
+        tab.columnconfigure(0, weight=1)
 
-        conn = self._section(tab, "Connection")
+        # Scrollable canvas + scrollbar — all content goes into `inner`
+        _scroll_canvas = tk.Canvas(tab, bg="#1e1e2e", highlightthickness=0)
+        _scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL,
+                                   command=_scroll_canvas.yview)
+        _scroll_canvas.configure(yscrollcommand=_scrollbar.set)
+        _scrollbar.grid(row=0, column=1, sticky="ns")
+        _scroll_canvas.grid(row=0, column=0, sticky="nsew")
+
+        inner = tk.Frame(_scroll_canvas, bg="#1e1e2e")
+        _inner_id = _scroll_canvas.create_window((0, 0), window=inner,
+                                                  anchor="nw")
+
+        def _on_inner_configure(event):
+            _scroll_canvas.configure(
+                scrollregion=_scroll_canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            # Keep inner frame as wide as the canvas
+            _scroll_canvas.itemconfig(_inner_id, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        _scroll_canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse-wheel scrolling (Windows + Linux + macOS)
+        def _on_mousewheel(event):
+            if event.num == 4:
+                _scroll_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                _scroll_canvas.yview_scroll(1, "units")
+            else:
+                _scroll_canvas.yview_scroll(
+                    int(-1 * (event.delta / 120)), "units")
+
+        _scroll_canvas.bind("<MouseWheel>", _on_mousewheel)
+        _scroll_canvas.bind("<Button-4>",   _on_mousewheel)
+        _scroll_canvas.bind("<Button-5>",   _on_mousewheel)
+        inner.bind("<MouseWheel>", _on_mousewheel)
+        inner.bind("<Button-4>",   _on_mousewheel)
+        inner.bind("<Button-5>",   _on_mousewheel)
+
+        # From here on, pack everything into `inner` instead of `tab`
+        # We shadow the name so the rest of the method is unchanged
+        tab_content = inner
+
+        # ── Connection ────────────────────────────────────────────────────
+        conn = self._section(tab_content, "Connection")
         tk.Label(conn, text="Camera index:", bg="#181825", fg="#a6adc8",
                  font=("Consolas", 9)).grid(row=0, column=0, padx=(8, 4), pady=6)
 
@@ -463,13 +579,158 @@ class ExperimentApp(tk.Tk):
         tk.Button(conn, text="Disconnect", command=self._disconnect_arducam,
                   **self._btn(fg="#f38ba8")).grid(row=0, column=3, padx=(4, 8))
 
-        preview = self._section(tab, "Preview")
+        # ── Focus controls ────────────────────────────────────────────────
+        focus_sec = self._section(tab_content, "Focus")
+
+        focus_row = tk.Frame(focus_sec, bg="#181825")
+        focus_row.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        # Autofocus toggle
+        self._af_btn = tk.Button(
+            focus_row, text="⟳  Autofocus: ON",
+            command=self._toggle_autofocus,
+            bg="#1e4466", fg="#89b4fa", activebackground="#2a5070",
+            font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=10, pady=4)
+        self._af_btn.pack(side=tk.LEFT, padx=(0, 16))
+
+        tk.Button(focus_row, text="Trigger AF",
+                  command=self._trigger_autofocus,
+                  **self._btn(fg="#89b4fa")).pack(side=tk.LEFT, padx=(0, 16))
+
+        # Manual focus slider (0–1023 per ArduCam SDK) + entry
+        tk.Label(focus_row, text="Manual focus:", bg="#181825", fg="#a6adc8",
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self._focus_slider = tk.Scale(
+            focus_row, from_=0, to=1023,
+            orient=tk.HORIZONTAL, length=220,
+            variable=self._arducam_focus_var,
+            command=self._on_focus_slider,
+            bg="#181825", fg="#cdd6f4",
+            troughcolor="#313244", activebackground="#45475a",
+            highlightthickness=0, relief=tk.FLAT,
+            font=("Consolas", 8))
+        self._focus_slider.pack(side=tk.LEFT, padx=(0, 6))
+
+        tk.Entry(focus_row, textvariable=self._arducam_focus_var, width=5,
+                 bg="#313244", fg="#cdd6f4", insertbackground="#cdd6f4",
+                 font=("Consolas", 9), relief=tk.FLAT
+                 ).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(focus_row, text="Set",
+                  command=self._apply_manual_focus,
+                  **self._btn()).pack(side=tk.LEFT)
+
+        # Current focus readout
+        focus_info = tk.Frame(focus_sec, bg="#181825")
+        focus_info.pack(fill=tk.X, padx=10, pady=(0, 8))
+        tk.Label(focus_info, text="Current:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        self._focus_readout_var = tk.StringVar(value="—")
+        tk.Label(focus_info, textvariable=self._focus_readout_var,
+                 bg="#181825", fg="#cdd6f4",
+                 font=("Consolas", 8, "bold"), width=6, anchor="w"
+                 ).pack(side=tk.LEFT, padx=(3, 16))
+        tk.Label(focus_info,
+                 text="Range 0–1023.  Autofocus must be OFF for manual focus to take effect.",
+                 bg="#181825", fg="#585b70",
+                 font=("Consolas", 8, "italic")).pack(side=tk.LEFT)
+
+        # ── Preview ───────────────────────────────────────────────────────
+        preview = self._section(tab_content, "Preview")
         tk.Label(preview, text="RGB Feed", bg="#181825", fg="#89b4fa",
                  font=("Consolas", 8)).pack(pady=(4, 2))
         self._arducam_canvas = tk.Canvas(preview, width=ARDUCAM_W, height=ARDUCAM_H,
                                          bg="#11111b", highlightthickness=1,
                                          highlightbackground="#313244")
         self._arducam_canvas.pack(padx=6, pady=(0, 6))
+
+        # ── ORB Localization ──────────────────────────────────────────────
+        orb_sec = self._section(tab_content, "ORB Localization")
+
+        # --- Row 1: reference image path + controls ----------------------
+        ref_row = tk.Frame(orb_sec, bg="#181825")
+        ref_row.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        tk.Label(ref_row, text="Reference map:", bg="#181825", fg="#a6adc8",
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Entry(ref_row, textvariable=self._orb_ref_img_path, width=36,
+                 bg="#313244", fg="#cdd6f4", insertbackground="#cdd6f4",
+                 font=("Consolas", 9), relief=tk.FLAT
+                 ).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(ref_row, text="Browse",
+                  command=self._browse_orb_ref,
+                  **self._btn()).pack(side=tk.LEFT, padx=(0, 16))
+
+        # Start / Stop buttons
+        self._orb_start_btn = tk.Button(
+            ref_row, text="▶  Start ORB",
+            command=self._start_orb,
+            bg="#1e6640", fg="#a6e3a1", activebackground="#2a7a50",
+            font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=10, pady=4)
+        self._orb_start_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._orb_stop_btn = tk.Button(
+            ref_row, text="■  Stop",
+            command=self._stop_orb,
+            bg="#6e2020", fg="#f38ba8", activebackground="#7e3030",
+            font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=10, pady=4,
+            state=tk.DISABLED)
+        self._orb_stop_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(ref_row, text="Clear History",
+                  command=self._orb_clear_history,
+                  **self._btn(fg="#fab387")).pack(side=tk.LEFT)
+
+        # --- Row 2: status + frame counter + numeric readouts -----------
+        info_row = tk.Frame(orb_sec, bg="#181825")
+        info_row.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        # Status pill
+        tk.Label(info_row, text="Status:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        self._orb_status_lbl = tk.Label(
+            info_row, textvariable=self._orb_status_var,
+            bg="#181825", fg="#a6adc8",
+            font=("Consolas", 8, "bold"), width=14, anchor="w")
+        self._orb_status_lbl.pack(side=tk.LEFT, padx=(3, 16))
+
+        tk.Label(info_row, text="Frames:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        tk.Label(info_row, textvariable=self._orb_count_var,
+                 bg="#181825", fg="#cdd6f4",
+                 font=("Consolas", 8), width=6, anchor="w"
+                 ).pack(side=tk.LEFT, padx=(3, 20))
+
+        # Numeric readouts  Est lon / lat / gantry  |  GT gantry
+        readouts = [
+            ("Est Lon:",  self._orb_est_lon_var,  "#89b4fa"),
+            ("Est Lat:",  self._orb_est_lat_var,  "#89b4fa"),
+            ("Est X mm:", self._orb_est_gx_var,   "#cba6f7"),
+            ("Est Y mm:", self._orb_est_gy_var,   "#cba6f7"),
+            ("GT X mm:",  self._orb_gt_gx_var,    "#a6e3a1"),
+            ("GT Y mm:",  self._orb_gt_gy_var,    "#a6e3a1"),
+        ]
+        for lbl_text, var, fg_col in readouts:
+            tk.Label(info_row, text=lbl_text, bg="#181825", fg="#585b70",
+                     font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 2))
+            tk.Label(info_row, textvariable=var,
+                     bg="#181825", fg=fg_col,
+                     font=("Consolas", 8, "bold"), width=9, anchor="w"
+                     ).pack(side=tk.LEFT, padx=(0, 10))
+
+        # --- Row 3: map canvas -------------------------------------------
+        map_frame = tk.Frame(orb_sec, bg="#181825")
+        map_frame.pack(padx=10, pady=(0, 10))
+
+        self._orb_map_canvas = tk.Canvas(
+            map_frame,
+            width=ORB_MAP_W, height=ORB_MAP_H,
+            bg="#11111b", highlightthickness=1,
+            highlightbackground="#313244")
+        self._orb_map_canvas.pack()
+
+        # Draw a placeholder grid so the canvas isn't blank before an image loads
+        self._orb_draw_placeholder()
 
         return tab
 
@@ -831,12 +1092,103 @@ class ExperimentApp(tk.Tk):
         self._log(f"[OK   ] ArduCam opened (index {idx}).")
         self._set_status("ArduCam", True)
 
+        # Read initial autofocus and focus values from the camera
+        af_val    = cap.get(cv2.CAP_PROP_AUTOFOCUS)
+        focus_val = cap.get(cv2.CAP_PROP_FOCUS)
+        af_on = bool(af_val)
+        self._arducam_autofocus_var.set(af_on)
+        if af_on:
+            self._af_btn.config(text="⟳  Autofocus: ON",
+                                bg="#1e4466", fg="#89b4fa",
+                                activebackground="#2a5070")
+        else:
+            self._af_btn.config(text="⟳  Autofocus: OFF",
+                                bg="#313244", fg="#585b70",
+                                activebackground="#45475a")
+        if focus_val >= 0:
+            self._arducam_focus_var.set(str(int(focus_val)))
+            self._focus_readout_var.set(str(int(focus_val)))
+        self._log(f"[INFO ] Camera initial state — autofocus={'on' if af_on else 'off'}  "
+                  f"focus={int(focus_val)}")
+
     def _disconnect_arducam(self):
+        if self._orb_running:
+            self._stop_orb()
         if self._arducam:
             self._arducam.release()
             self._arducam = None
             self._log("[INFO ] ArduCam disconnected.")
         self._set_status("ArduCam", False)
+
+    # ── ArduCam focus helpers ─────────────────────────────────────────────────
+
+    def _toggle_autofocus(self) -> None:
+        """Toggle autofocus on/off and update button appearance."""
+        new_state = not self._arducam_autofocus_var.get()
+        self._arducam_autofocus_var.set(new_state)
+        if new_state:
+            self._af_btn.config(text="⟳  Autofocus: ON",
+                                bg="#1e4466", fg="#89b4fa",
+                                activebackground="#2a5070")
+        else:
+            self._af_btn.config(text="⟳  Autofocus: OFF",
+                                bg="#313244", fg="#585b70",
+                                activebackground="#45475a")
+        if self._arducam is not None:
+            val = 1 if new_state else 0
+            supported = self._arducam.set(cv2.CAP_PROP_AUTOFOCUS, val)
+            state_str = "ON" if new_state else "OFF"
+            if supported:
+                self._log(f"[OK   ] Autofocus set {state_str}.")
+            else:
+                self._log(f"[WARN ] Camera did not accept autofocus={state_str} "
+                          f"(may not be supported by this device/driver).")
+        else:
+            self._log("[WARN ] Camera not connected — setting will apply on next connect.")
+
+    def _trigger_autofocus(self) -> None:
+        """Send a one-shot autofocus trigger."""
+        if self._arducam is None:
+            self._log("[WARN ] Camera not connected.")
+            return
+        self._arducam.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+        self._arducam_autofocus_var.set(True)
+        self._af_btn.config(text="⟳  Autofocus: ON",
+                            bg="#1e4466", fg="#89b4fa",
+                            activebackground="#2a5070")
+        self._log("[INFO ] Autofocus trigger sent.")
+
+    def _on_focus_slider(self, value) -> None:
+        """Called while slider is dragged — applies focus in real time.
+        Mirrors ArduCam's own trackbar callback: cap.set(CAP_PROP_FOCUS, val)."""
+        if self._arducam is None:
+            return
+        try:
+            self._arducam.set(cv2.CAP_PROP_FOCUS, int(float(value)))
+        except (ValueError, TypeError):
+            pass
+
+    def _apply_manual_focus(self) -> None:
+        """Apply the value typed in the focus entry box (0–1023)."""
+        if self._arducam is None:
+            self._log("[WARN ] Camera not connected.")
+            return
+        try:
+            focus_val = int(self._arducam_focus_var.get())
+        except ValueError:
+            self._log("[ERROR] Focus value must be an integer (0–1023).")
+            return
+        if not 0 <= focus_val <= 1023:
+            self._log("[ERROR] Focus value must be between 0 and 1023.")
+            return
+        supported = self._arducam.set(cv2.CAP_PROP_FOCUS, focus_val)
+        actual    = self._arducam.get(cv2.CAP_PROP_FOCUS)
+        self._focus_readout_var.set(str(int(actual)))
+        if supported:
+            self._log(f"[OK   ] Focus set to {focus_val} (camera reports {int(actual)}).")
+        else:
+            self._log(f"[WARN ] Camera did not accept focus={focus_val} "
+                      f"(may not be supported by this device/driver).")
 
     # ── Gantry connection ─────────────────────────────────────────────────────
 
@@ -1220,8 +1572,13 @@ class ExperimentApp(tk.Tk):
                            cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
                            ARDUCAM_W, ARDUCAM_H)
                 self._draw_crosshair(self._arducam_canvas, ARDUCAM_W, ARDUCAM_H)
+            # Keep focus readout current (cheap get, ~every 50 ms)
+            focus_now = self._arducam.get(cv2.CAP_PROP_FOCUS)
+            if focus_now >= 0:
+                self._focus_readout_var.set(str(int(focus_now)))
 
         self._poll_gantry()
+        self._poll_orb()
         self._after_id = self.after(POLL_MS, self._poll_cameras)
 
     def _draw(self, canvas: tk.Canvas, arr: np.ndarray, w: int, h: int):
@@ -1487,13 +1844,385 @@ class ExperimentApp(tk.Tk):
                 pass
             self._snap_window = None
 
+    # ── ORB Localization ──────────────────────────────────────────────────────
+
+    def _browse_orb_ref(self) -> None:
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select Mars reference map image",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
+                       ("All files", "*.*")],
+        )
+        if path:
+            self._orb_ref_img_path.set(path)
+            # Reload the basemap thumbnail for the canvas
+            self._orb_load_basemap()
+
+    def _orb_load_basemap(self) -> bool:
+        """Load and scale the reference image for the map canvas. Returns True on success."""
+        if not _CV2_AVAILABLE:
+            self._log("[ERROR] Basemap: OpenCV not available.")
+            return False
+        path = self._orb_ref_img_path.get().strip()
+        self._log(f"[INFO ] Basemap: trying to load '{path}'")
+        self._log(f"[INFO ] Basemap: cwd is '{os.getcwd()}'")
+        if not path:
+            self._log("[ERROR] Basemap: path is empty.")
+            return False
+        if not os.path.isfile(path):
+            self._log(f"[ERROR] Basemap: file not found — '{path}'")
+            self._log(f"[INFO ] Basemap: files in cwd: {os.listdir('.')}")
+            return False
+        try:
+            img_bgr = cv2.imread(path)
+            if img_bgr is None:
+                self._log(f"[ERROR] Basemap: cv2.imread returned None for '{path}'")
+                return False
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb).resize(
+                (ORB_MAP_W, ORB_MAP_H), Image.LANCZOS)
+            self._orb_map_photo = ImageTk.PhotoImage(pil_img)
+            h, w = img_bgr.shape[:2]
+            self._orb_ref_w = w
+            self._orb_ref_h = h
+            self._log(f"[OK   ] Basemap loaded: {w}×{h} px")
+            return True
+        except Exception as e:
+            self._log(f"[ERROR] Basemap load exception: {e}")
+            return False
+
+    def _orb_draw_placeholder(self) -> None:
+        """Draw a dim grid on the map canvas before any image is loaded."""
+        cnv = self._orb_map_canvas
+        cnv.delete("all")
+        # dark background
+        cnv.create_rectangle(0, 0, ORB_MAP_W, ORB_MAP_H,
+                              fill="#0d0d1a", outline="")
+        # faint grid lines
+        grid_col = "#1e2040"
+        for x in range(0, ORB_MAP_W, ORB_MAP_W // 12):
+            cnv.create_line(x, 0, x, ORB_MAP_H, fill=grid_col, width=1)
+        for y in range(0, ORB_MAP_H, ORB_MAP_H // 6):
+            cnv.create_line(0, y, ORB_MAP_W, y, fill=grid_col, width=1)
+        # centre label
+        cnv.create_text(ORB_MAP_W // 2, ORB_MAP_H // 2,
+                        text="Load reference map to enable ORB localization",
+                        fill="#313244", font=("Consolas", 9), anchor="center")
+
+    def _orb_redraw_map(self) -> None:
+        """Repaint the map canvas: basemap + history trail + current dots."""
+        cnv = self._orb_map_canvas
+        cnv.delete("all")
+
+        # Basemap
+        if self._orb_map_photo is not None:
+            cnv.create_image(0, 0, anchor=tk.NW, image=self._orb_map_photo)
+        else:
+            self._orb_draw_placeholder()
+            return
+
+        # History trail — estimated positions (blue/purple fading dots)
+        n = len(self._orb_history_map)
+        for i, (px, py) in enumerate(self._orb_history_map):
+            alpha_frac = (i + 1) / max(n, 1)
+            # Fade from dim purple → bright cyan-blue
+            r = int(30  + alpha_frac * 80)
+            g = int(40  + alpha_frac * 140)
+            b = int(120 + alpha_frac * 135)
+            color = f"#{r:02x}{g:02x}{b:02x}"
+            r_dot = max(2, int(3 * alpha_frac))
+            cnv.create_oval(px - r_dot, py - r_dot, px + r_dot, py + r_dot,
+                            fill=color, outline="", tags="orb_trail")
+
+        # Connect trail with a thin polyline if we have ≥2 points
+        if len(self._orb_history_map) >= 2:
+            flat = [coord for pt in self._orb_history_map for coord in pt]
+            cnv.create_line(*flat, fill="#4488cc", width=1,
+                            smooth=True, tags="orb_trail")
+
+        # Ground truth history trail (green)
+        for i, (gx_mm, gy_mm) in enumerate(self._orb_history_gantry):
+            px, py = self._gantry_mm_to_canvas(gx_mm, gy_mm)
+            if px is None:
+                continue
+            alpha_frac = (i + 1) / max(len(self._orb_history_gantry), 1)
+            r_dot = max(2, int(3 * alpha_frac))
+            shade = int(80 + alpha_frac * 175)
+            color = f"#00{shade:02x}00"
+            cnv.create_oval(px - r_dot, py - r_dot, px + r_dot, py + r_dot,
+                            fill=color, outline="", tags="orb_gt_trail")
+
+        if len(self._orb_history_gantry) >= 2:
+            valid_pts = [self._gantry_mm_to_canvas(gx, gy)
+                         for gx, gy in self._orb_history_gantry]
+            valid_pts = [(px, py) for px, py in valid_pts if px is not None]
+            if len(valid_pts) >= 2:
+                flat_gt = [coord for pt in valid_pts for coord in pt]
+                cnv.create_line(*flat_gt, fill="#44cc44", width=1,
+                                smooth=True, tags="orb_gt_trail")
+
+        # Current estimated position — bright cyan dot + crosshair
+        if self._orb_history_map:
+            cx, cy = self._orb_history_map[-1]
+            R = 6
+            cnv.create_oval(cx - R, cy - R, cx + R, cy + R,
+                            fill="#00d4ff", outline="#ffffff", width=1,
+                            tags="orb_est_dot")
+            for dx, dy in ((-R*3, 0), (R*3, 0), (0, -R*3), (0, R*3)):
+                ex, ey = cx + dx//3*2, cy + dy//3*2
+                cnv.create_line(cx + dx//3, cy + dy//3, ex, ey,
+                                fill="#00d4ff", width=1, tags="orb_est_dot")
+            cnv.create_text(cx + R + 4, cy - R - 4,
+                            text="EST", fill="#00d4ff",
+                            font=("Consolas", 7, "bold"), anchor="w",
+                            tags="orb_est_dot")
+
+        # Current ground truth position — bright green dot
+        if self._orb_history_gantry:
+            gx_mm, gy_mm = self._orb_history_gantry[-1]
+            px, py = self._gantry_mm_to_canvas(gx_mm, gy_mm)
+            if px is not None:
+                R = 6
+                cnv.create_oval(px - R, py - R, px + R, py + R,
+                                fill="#00ff88", outline="#ffffff", width=1,
+                                tags="orb_gt_dot")
+                cnv.create_text(px + R + 4, py - R - 4,
+                                text="GT", fill="#00ff88",
+                                font=("Consolas", 7, "bold"), anchor="w",
+                                tags="orb_gt_dot")
+
+    def _ref_px_to_canvas(self, ref_px_x: float, ref_px_y: float):
+        """
+        Convert a pixel coordinate in the full-resolution reference image
+        to canvas (display) coordinates.
+        Returns (canvas_x, canvas_y).
+        """
+        if not hasattr(self, "_orb_ref_w") or self._orb_ref_w == 0:
+            return None, None
+        cx = ref_px_x / self._orb_ref_w  * ORB_MAP_W
+        cy = ref_px_y / self._orb_ref_h  * ORB_MAP_H
+        return cx, cy
+
+    def _ref_px_to_lon_lat(self, ref_px_x: float, ref_px_y: float):
+        """
+        Convert a reference-image pixel to (longitude, latitude) degrees,
+        assuming a simple equirectangular projection centred at 0°, ±180° lon.
+        The Mars 4K image from planetpixelemporium is 4096×2048 equirectangular.
+        """
+        if not hasattr(self, "_orb_ref_w") or self._orb_ref_w == 0:
+            return None, None
+        lon = (ref_px_x / self._orb_ref_w) * 360.0 - 180.0
+        lat = 90.0 - (ref_px_y / self._orb_ref_h) * 180.0
+        return lon, lat
+
+    def _gantry_mm_to_canvas(self, gx_mm: float, gy_mm: float):
+        """
+        Convert gantry work-coordinates (mm) to map canvas pixel coordinates.
+        Axes are rotated 90° CCW relative to the map: gantry X maps to canvas Y
+        (inverted) and gantry Y maps to canvas X.
+        """
+        if self._map_corner_br is None or self._map_corner_tl is None:
+            return None, None
+        tl_x, tl_y = self._map_corner_tl
+        br_x, br_y = self._map_corner_br
+        span_x = br_x - tl_x
+        span_y = br_y - tl_y
+        if abs(span_x) < 1e-6 or abs(span_y) < 1e-6:
+            return None, None
+        # 90° CCW: gantry Y → canvas X, gantry X → canvas Y (inverted)
+        fx = (gy_mm - tl_y) / span_y          # gantry Y drives horizontal
+        fy = (gx_mm - tl_x) / span_x   # gantry X drives vertical, flipped
+        cx = fx * ORB_MAP_W
+        cy = fy * ORB_MAP_H
+        return cx, cy
+ 
+    def _ref_px_to_gantry_mm(self, ref_px_x: float, ref_px_y: float):
+        """
+        Convert a reference-image pixel coordinate to gantry mm, using the
+        recorded map calibration corners as the tie-points.
+
+        Returns (gx_mm, gy_mm) or (None, None) if calibration is absent.
+        """
+        if self._map_corner_br is None or self._map_corner_tl is None:
+            return None, None
+        if not hasattr(self, "_orb_ref_w") or self._orb_ref_w == 0:
+            return None, None
+        # Fraction of the reference image
+        fx = ref_px_x / self._orb_ref_w
+        fy = ref_px_y / self._orb_ref_h
+        tl_x, tl_y = self._map_corner_tl
+        br_x, br_y = self._map_corner_br
+        gx_mm = tl_x + fx * (br_x - tl_x)
+        gy_mm = tl_y + fy * (br_y - tl_y)
+        return gx_mm, gy_mm
+
+    def _start_orb(self) -> None:
+        self._log(f"[INFO ] Start ORB pressed — _ORB_AVAILABLE={_ORB_AVAILABLE}  _CV2_AVAILABLE={_CV2_AVAILABLE}  arducam={'connected' if self._arducam else 'None'}")
+        if not _ORB_AVAILABLE:
+            self._log("[ERROR] ORBStuff.py not importable — check that it is in the same directory.")
+            return
+        if not _CV2_AVAILABLE:
+            self._log("[ERROR] OpenCV not available.")
+            return
+        if self._arducam is None:
+            self._log("[WARN ] ArduCam not connected — connect camera first.")
+            return
+
+        # Load / verify the basemap
+        if self._orb_map_photo is None:
+            self._log("[INFO ] Basemap not yet loaded — attempting now...")
+            ok = self._orb_load_basemap()
+            if not ok:
+                self._log("[WARN ] Reference map image not loaded — specify a valid path and try again.")
+                return
+        else:
+            self._log("[INFO ] Basemap already loaded, skipping reload.")
+
+        self._orb_running = True
+        self._orb_start_btn.configure(state=tk.DISABLED)
+        self._orb_stop_btn.configure(state=tk.NORMAL)
+        self._orb_status_var.set("Running")
+        self._orb_status_lbl.configure(fg="#a6e3a1")
+        self._log("[INFO ] ORB localization started.")
+        self._orb_dispatch_next_frame()
+
+    def _stop_orb(self) -> None:
+        self._orb_running = False
+        self._orb_start_btn.configure(state=tk.NORMAL)
+        self._orb_stop_btn.configure(state=tk.DISABLED)
+        self._orb_status_var.set("Idle")
+        self._orb_status_lbl.configure(fg="#a6adc8")
+        self._log("[INFO ] ORB localization stopped.")
+
+    def _orb_clear_history(self) -> None:
+        self._orb_history_map.clear()
+        self._orb_history_gantry.clear()
+        self._orb_frame_count = 0
+        self._orb_count_var.set("0")
+        for var in (self._orb_est_lon_var, self._orb_est_lat_var,
+                    self._orb_est_gx_var,  self._orb_est_gy_var,
+                    self._orb_gt_gx_var,   self._orb_gt_gy_var):
+            var.set("—")
+        self._orb_redraw_map()
+        self._log("[INFO ] ORB history cleared.")
+
+    def _orb_dispatch_next_frame(self) -> None:
+        """Grab the latest ArduCam frame and launch an ORBWorker for it."""
+        if not self._orb_running or self._arducam is None:
+            return
+        # Worker is still busy with the previous frame — try again next poll tick
+        if self._orb_worker is not None and self._orb_worker.is_alive():
+            return
+        ret, frame = self._arducam.read()
+        if not ret:
+            self._log("[WARN ] ORB: could not read ArduCam frame.")
+            return
+        # frame is BGR from cv2 — keep as BGR; ORBWorker converts to gray
+        self._orb_worker = ORBWorker(frame.copy(), self._orb_result_q)
+        self._orb_worker.start()
+        self._orb_status_var.set("Processing…")
+        self._orb_status_lbl.configure(fg="#fab387")
+
+    def _poll_orb(self) -> None:
+        """
+        Called every POLL_MS from _poll_cameras.
+        1. Drain any result from the finished ORBWorker.
+        2. If running and worker is done, dispatch the next frame.
+        """
+        # Drain results
+        try:
+            while True:
+                item = self._orb_result_q.get_nowait()
+                self._orb_handle_result(item)
+        except queue.Empty:
+            pass
+
+        # Dispatch next frame if the previous worker has finished
+        if self._orb_running:
+            if self._orb_worker is None or not self._orb_worker.is_alive():
+                self._orb_dispatch_next_frame()
+
+    def _orb_handle_result(self, item: tuple) -> None:
+        """Process one result tuple from ORBWorker and update the UI."""
+        if item[0] == "err":
+            self._log(f"[WARN ] ORB: {item[1]}")
+            if self._orb_running:
+                self._orb_status_var.set("No match")
+                self._orb_status_lbl.configure(fg="#f38ba8")
+            return
+
+        _, center, ref_res = item   # ("ok", [cx, cy], [ref_w, ref_h])
+        cx_ref, cy_ref = center
+        ref_w,  ref_h  = ref_res
+
+        if np.isnan(cx_ref) or np.isnan(cy_ref):
+            self._log("[WARN ] ORB: match returned NaN — not enough features.")
+            if self._orb_running:
+                self._orb_status_var.set("No match")
+                self._orb_status_lbl.configure(fg="#f38ba8")
+            return
+
+        # ── Update frame counter ──────────────────────────────────────────────
+        self._orb_frame_count += 1
+        self._orb_count_var.set(str(self._orb_frame_count))
+
+        # ── Store actual ref resolution returned by getPosePixelCords ─────────
+        # (may differ from what we loaded if the function reloads internally)
+        self._orb_ref_w = ref_w
+        self._orb_ref_h = ref_h
+
+        # ── Canvas position for the estimated dot ─────────────────────────────
+        canvas_x, canvas_y = self._ref_px_to_canvas(cx_ref, cy_ref)
+        if canvas_x is not None:
+            self._orb_history_map.append((canvas_x, canvas_y))
+
+        # ── Lon / Lat readout ─────────────────────────────────────────────────
+        lon, lat = self._ref_px_to_lon_lat(cx_ref, cy_ref)
+        if lon is not None:
+            self._orb_est_lon_var.set(f"{lon:+.3f}°")
+            self._orb_est_lat_var.set(f"{lat:+.3f}°")
+
+        # ── Estimated gantry mm (needs calibration) ───────────────────────────
+        est_gx, est_gy = self._ref_px_to_gantry_mm(cx_ref, cy_ref)
+        if est_gx is not None:
+            self._orb_est_gx_var.set(f"{est_gx:.1f}")
+            self._orb_est_gy_var.set(f"{est_gy:.1f}")
+        else:
+            self._orb_est_gx_var.set("no cal")
+            self._orb_est_gy_var.set("no cal")
+
+        # ── Ground truth from gantry ──────────────────────────────────────────
+        if self._gantry_worker is not None:
+            pos, _ = self._gantry_worker.get_position()
+            gt_gx, gt_gy = pos["x"], pos["y"]
+            self._orb_gt_gx_var.set(f"{gt_gx:.1f}")
+            self._orb_gt_gy_var.set(f"{gt_gy:.1f}")
+            self._orb_history_gantry.append((gt_gx, gt_gy))
+        else:
+            self._orb_gt_gx_var.set("no gantry")
+            self._orb_gt_gy_var.set("no gantry")
+
+        # ── Redraw map ────────────────────────────────────────────────────────
+        self._orb_redraw_map()
+        if self._orb_running:
+            self._orb_status_var.set("Running")
+            self._orb_status_lbl.configure(fg="#a6e3a1")
+
+        self._log(
+            f"[ORB  ] frame {self._orb_frame_count}  "
+            f"ref=({cx_ref:.0f}, {cy_ref:.0f})  "
+            f"lon={lon:+.2f}°  lat={lat:+.2f}°"
+            + (f"  est_gantry=({est_gx:.1f}, {est_gy:.1f}) mm" if est_gx is not None else "")
+        )
+
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def destroy(self):
         self.after_cancel(self._after_id)
         if self._track_runner is not None:
             self._track_runner.stop()
-        self._disconnect_tau()
+        self._stop_orb()
+        self._disconnect_rs()
         self._disconnect_arducam()
         self._disconnect_gantry()
         super().destroy()
