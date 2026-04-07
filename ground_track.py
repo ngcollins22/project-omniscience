@@ -98,24 +98,60 @@ class MapCalibration:
         """
         Convert a (lat, lon) coordinate to gantry (x_mm, y_mm).
 
-        Independent linear interpolation on each axis:
-            lat : corner_tl (lat_max) → corner_br (lat_min)
-            lon : corner_tl (lon_min) → corner_br (lon_max)
+        Aspect-ratio-preserving fit
+        ---------------------------
+        The ground track's lat/lon bounding box is scaled uniformly so that
+        the wider dimension (in degrees-per-mm) fills its map axis completely.
+        The narrower dimension is centered within the remaining space.
 
-        Coordinates outside the region are clamped to the table bounds.
+        Axis mapping (OMNIScience print orientation):
+            Gantry X: corner_tl → corner_br  maps  lat_max → lat_min  (N to S)
+            Gantry Y: corner_tl → corner_br  maps  lon_min → lon_max  (W to E)
         """
         r = self.region
-        dlat = r.lat_min_deg - r.lat_max_deg   # negative
-        dlon = r.lon_max_deg - r.lon_min_deg   # positive
 
-        lat_frac = (lat_deg - r.lat_max_deg) / dlat   # 0 at TL, 1 at BR
-        lon_frac = (lon_deg - r.lon_min_deg) / dlon   # 0 at TL, 1 at BR
+        lat_span = r.lat_max_deg - r.lat_min_deg   # total degrees, positive
+        lon_span = r.lon_max_deg - r.lon_min_deg   # total degrees, positive
 
-        lat_frac = max(0.0, min(1.0, lat_frac))
-        lon_frac = max(0.0, min(1.0, lon_frac))
+        map_x_span = self.corner_br[0] - self.corner_tl[0]   # signed mm (e.g. -378)
+        map_y_span = self.corner_br[1] - self.corner_tl[1]   # signed mm (e.g. -789)
 
-        x_mm = self.corner_tl[0] + lat_frac * (self.corner_br[0] - self.corner_tl[0])
-        y_mm = self.corner_tl[1] + lon_frac * (self.corner_br[1] - self.corner_tl[1])
+        # Uniform scale: pick whichever axis is the binding constraint
+        # so the shape is preserved (no stretching)
+        if lat_span > 0 and lon_span > 0:
+            scale_x = abs(map_x_span) / lat_span   # mm/deg if lat fills X
+            scale_y = abs(map_y_span) / lon_span   # mm/deg if lon fills Y
+            scale   = min(scale_x, scale_y)
+        else:
+            scale = 1.0
+
+        # Fractional position within the bounding box
+        # lat: 0.0 = lat_max (north, TL side), 1.0 = lat_min (south, BR side)
+        lat_frac = (r.lat_max_deg - lat_deg) / lat_span if lat_span else 0.5
+        # lon: 0.0 = lon_min (west, TL side), 1.0 = lon_max (east, BR side)
+        lon_frac = (lon_deg - r.lon_min_deg) / lon_span if lon_span else 0.5
+
+        # Offset from centre of the map box in mm
+        # (frac - 0.5) goes -0.5..+0.5; multiply by scale*span to get mm
+        lat_offset_mm = (lat_frac - 0.5) * lat_span * scale
+        lon_offset_mm = (lon_frac - 0.5) * lon_span * scale
+
+        # Centre of the gantry map in mm
+        cx = (self.corner_tl[0] + self.corner_br[0]) / 2.0
+        cy = (self.corner_tl[1] + self.corner_br[1]) / 2.0
+
+        # X increases as lat_frac increases (TL→BR = north→south)
+        # Y increases as lon_frac increases (TL→BR = west→east)
+        # map_x_span is negative (-378), so we go negative as lat_frac grows
+        x_mm = cx + lat_offset_mm * (1 if map_x_span >= 0 else -1)
+        y_mm = cy + lon_offset_mm * (1 if map_y_span >= 0 else -1)
+
+        # Clamp to map boundaries
+        x_lo, x_hi = sorted([self.corner_tl[0], self.corner_br[0]])
+        y_lo, y_hi = sorted([self.corner_tl[1], self.corner_br[1]])
+        x_mm = max(x_lo, min(x_hi, x_mm))
+        y_mm = max(y_lo, min(y_hi, y_mm))
+
         return x_mm, y_mm
 
     def map_size_mm(self) -> Tuple[float, float]:
@@ -191,17 +227,44 @@ def load_csv(path: str) -> GroundTrack:
         lat_deg   – geodetic latitude in degrees
         lon_deg   – geographic longitude in degrees
 
+    The delimiter is detected automatically — tab-separated and
+    comma-separated files both work. Column order does not matter.
     Any additional columns are silently ignored.
     """
     waypoints = []
-    with open(path, newline="") as fh:
-        reader = csv.DictReader(fh)
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        # ── Auto-detect delimiter (handles tab and comma) ─────────────────
+        sample = fh.read(4096)
+        fh.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
+        except csv.Error:
+            dialect = csv.excel   # fall back to standard comma CSV
+
+        reader = csv.DictReader(fh, dialect=dialect)
+
+        # ── Strip whitespace and drop empty Excel ghost columns ───────────
+        # utf-8-sig handles the BOM; strip() catches spaces; the filter
+        # drops the empty trailing columns Excel adds when saving .csv
+        reader.fieldnames = (
+            [name.strip() for name in reader.fieldnames if name.strip()]
+            if reader.fieldnames else []
+        )
+
+        missing = {"time_s", "lat_deg", "lon_deg"} - set(reader.fieldnames)
+        if missing:
+            raise ValueError(
+                f"CSV is missing required columns: {sorted(missing)}. "
+                f"Columns found: {reader.fieldnames}"
+            )
+
         for row in reader:
             waypoints.append(Waypoint(
                 t_s=float(row["time_s"]),
                 lat_deg=float(row["lat_deg"]),
                 lon_deg=float(row["lon_deg"]),
             ))
+
     waypoints.sort(key=lambda w: w.t_s)
     return GroundTrack(waypoints=waypoints)
 
