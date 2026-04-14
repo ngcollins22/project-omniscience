@@ -194,7 +194,7 @@ def load_csv(path: str) -> GroundTrack:
     Any additional columns are silently ignored.
     """
     waypoints = []
-    with open(path, newline="") as fh:
+    with open(path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             waypoints.append(Waypoint(

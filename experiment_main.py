@@ -78,46 +78,6 @@ ARDUCAM_H    = 480
 POLL_MS      = 50    # GUI refresh interval
 
 
-# ── Background worker: reads RealSense D435 frames off the main thread ────────
-class RealSenseWorker(threading.Thread):
-    def __init__(self, pipeline, frame_q: queue.Queue):
-        super().__init__(daemon=True)
-        self.pipeline   = pipeline
-        self.frame_q    = frame_q
-        self._stop      = threading.Event()
-        self._colorizer = rs.colorizer()
-        self._align     = rs.align(rs.stream.color)
-
-    def stop(self):
-        self._stop.set()
-
-    def run(self):
-        while not self._stop.is_set():
-            try:
-                frames = self.pipeline.wait_for_frames(timeout_ms=5000)
-                aligned      = self._align.process(frames)
-                depth_frame  = aligned.get_depth_frame()
-                color_frame  = aligned.get_color_frame()
-                if not depth_frame or not color_frame:
-                    continue
-
-                depth_colorized = np.asanyarray(
-                    self._colorizer.colorize(depth_frame).get_data()
-                )   # (H, W, 3) uint8
-
-                color_rgb = np.asanyarray(color_frame.get_data())[:, :, ::-1].copy()
-                # color_frame is BGR from the SDK; reverse channel order → RGB
-
-                depth_raw = np.asanyarray(depth_frame.get_data()).astype(np.float32)
-                depth_m   = depth_raw / 1000.0        # uint16 mm → float32 m
-                depth_m[depth_m == 0] = np.nan        # mark invalid pixels
-
-                if not self.frame_q.full():
-                    self.frame_q.put_nowait((depth_colorized, color_rgb, depth_m))
-            except Exception as e:
-                self.frame_q.put_nowait(("error", str(e)))
-                break
-
 
 # ── Main application ──────────────────────────────────────────────────────────
 class ExperimentApp(tk.Tk):
@@ -132,8 +92,8 @@ class ExperimentApp(tk.Tk):
 
         # Device handles
         self._rs_pipeline  = None
-        self._rs_worker    = None
-        self._rs_frame_q   = queue.Queue(maxsize=2)
+        self._rs_sensor    = None      # depth sensor handle for set_option()
+        self._rs_colorizer = None      # rs.colorizer instance
         self._rs_serial    = ""        # serial number shown after connect
         self._arducam      = None
 
@@ -752,47 +712,66 @@ class ExperimentApp(tk.Tk):
 
         cfg_rs = self._cfg.realsense
         self._log("[INFO ] Starting RealSense pipeline...")
-        try:
-            pipeline = rs.pipeline()
-            rs_cfg   = rs.config()
-            rs_cfg.enable_stream(rs.stream.depth, cfg_rs.resolution_x, cfg_rs.resolution_y,
-                                 rs.format.z16,  cfg_rs.fps)
-            rs_cfg.enable_stream(rs.stream.color, cfg_rs.resolution_x, cfg_rs.resolution_y,
-                                 rs.format.bgr8, cfg_rs.fps)
-            profile  = pipeline.start(rs_cfg)
-            dev      = profile.get_device()
-            serial   = dev.get_info(rs.camera_info.serial_number)
-            name     = dev.get_info(rs.camera_info.name)
-            fw       = dev.get_info(rs.camera_info.firmware_version)
-            self._log(f"[OK   ] {name}  serial={serial}  fw={fw}")
-            self._rs_pipeline = pipeline
-            self._rs_serial   = serial
-            self._rs_serial_var.set(serial)
-            self._set_status("LiDAR", True)
-        except Exception as e:
-            self._log(f"[ERROR] {e}")
-            return
 
-        self._rs_frame_q = queue.Queue(maxsize=2)
-        self._rs_worker  = RealSenseWorker(self._rs_pipeline, self._rs_frame_q)
-        self._rs_worker.start()
+        # pipeline.start() can block for several seconds — run off the main thread
+        # so Tkinter stays responsive.  GUI updates are scheduled back via after().
+        def _do_start():
+            try:
+                pipeline = rs.pipeline()
+                rs_cfg   = rs.config()
+                rs_cfg.enable_stream(rs.stream.depth,
+                                     cfg_rs.resolution_x, cfg_rs.resolution_y,
+                                     rs.format.z16,  cfg_rs.fps)
+                rs_cfg.enable_stream(rs.stream.color,
+                                     cfg_rs.resolution_x, cfg_rs.resolution_y,
+                                     rs.format.rgb8, cfg_rs.fps)
+                profile    = pipeline.start(rs_cfg)
+                dev        = profile.get_device()
+                sensor     = dev.first_depth_sensor()
+                colorizer  = rs.colorizer()
+                serial     = dev.get_info(rs.camera_info.serial_number)
+                name       = dev.get_info(rs.camera_info.name)
+                fw         = dev.get_info(rs.camera_info.firmware_version)
+                self.after(0, lambda: self._on_rs_connected(
+                    pipeline, sensor, colorizer, serial, name, fw))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self._log(f"[ERROR] Connect failed: {err}"))
+
+        threading.Thread(target=_do_start, daemon=True).start()
+
+    def _on_rs_connected(self, pipeline, sensor, colorizer, serial, name, fw):
+        """Called on the main thread once pipeline.start() succeeds."""
+        self._log(f"[OK   ] {name}  serial={serial}  fw={fw}")
+        self._rs_pipeline  = pipeline
+        self._rs_sensor    = sensor
+        self._rs_colorizer = colorizer
+        self._rs_serial    = serial
+        self._rs_serial_var.set(serial)
+        self._set_status("LiDAR", True)
 
     def _disconnect_rs(self):
-        if self._rs_worker:
-            self._rs_worker.stop()
-            self._rs_worker = None
-        if self._rs_pipeline:
-            try:
-                self._rs_pipeline.stop()
-            except Exception:
-                pass
-            self._rs_pipeline = None
-            self._log("[INFO ] RealSense disconnected.")
+        # Clear handles immediately so polling stops and GUI is responsive.
+        # pipeline.stop() can block for seconds, so run it in the background.
+        pipeline = self._rs_pipeline
+        self._rs_pipeline  = None
+        self._rs_sensor    = None
+        self._rs_colorizer = None
         self._rs_serial_var.set("—")
         self._set_status("LiDAR", False)
 
+        if pipeline:
+            self._log("[INFO ] RealSense disconnecting...")
+            def _do_stop():
+                try:
+                    pipeline.stop()
+                except Exception:
+                    pass
+                self.after(0, lambda: self._log("[INFO ] RealSense disconnected."))
+            threading.Thread(target=_do_stop, daemon=True).start()
+
     def _apply_rs_settings(self):
-        if self._rs_pipeline is None:
+        if self._rs_sensor is None:
             self._log("[WARN ] Not connected — connect first.")
             return
         try:
@@ -801,19 +780,20 @@ class ExperimentApp(tk.Tk):
         except ValueError:
             self._log("[ERROR] Settings must be integers.")
             return
+        # Both calls happen on the main thread between poll cycles — no deadlock risk
+        # because wait_for_frames() is also on the main thread (Tkinter is single-threaded).
         try:
-            sensor = self._rs_pipeline.get_active_profile().get_device().first_depth_sensor()
-            sensor.set_option(rs.option.emitter_enabled, 1)
-            sensor.set_option(rs.option.laser_power, power)
+            self._rs_sensor.set_option(rs.option.emitter_enabled, 1)
+            self._rs_sensor.set_option(rs.option.laser_power, power)
             if exposure == 0:
-                sensor.set_option(rs.option.enable_auto_exposure, 1)
-                self._log(f"[OK   ] Emitter power: {power}, exposure: auto")
+                self._rs_sensor.set_option(rs.option.enable_auto_exposure, 1)
+                self._log(f"[OK   ] Settings applied — emitter power: {power}, exposure: auto")
             else:
-                sensor.set_option(rs.option.enable_auto_exposure, 0)
-                sensor.set_option(rs.option.exposure, exposure)
-                self._log(f"[OK   ] Emitter power: {power}, exposure: {exposure} µs")
+                self._rs_sensor.set_option(rs.option.enable_auto_exposure, 0)
+                self._rs_sensor.set_option(rs.option.exposure, exposure)
+                self._log(f"[OK   ] Settings applied — emitter power: {power}, exposure: {exposure} µs")
         except Exception as e:
-            self._log(f"[ERROR] {e}")
+            self._log(f"[ERROR] Apply settings failed: {e}")
 
     # ── ArduCam connection ────────────────────────────────────────────────────
 
@@ -1051,7 +1031,18 @@ class ExperimentApp(tk.Tk):
 
         region = self._get_dem_region_bounds()
         if region is None:
-            region = DemRegionBounds(0.0, 1.0, 0.0, 1.0)
+            track = self._ground_track
+            if track and len(track) > 0:
+                wps = track.waypoints
+                region = DemRegionBounds(
+                    lat_min_deg=min(w.lat_deg for w in wps),
+                    lat_max_deg=max(w.lat_deg for w in wps),
+                    lon_min_deg=min(w.lon_deg for w in wps),
+                    lon_max_deg=max(w.lon_deg for w in wps),
+                )
+                self._log("[INFO ] dem.region not configured — derived bounds from track extents.")
+            else:
+                region = DemRegionBounds(0.0, 1.0, 0.0, 1.0)
 
         cal = MapCalibration(corner_br=corner_br, corner_tl=corner_tl, region=region)
 
@@ -1194,23 +1185,33 @@ class ExperimentApp(tk.Tk):
     # ── Camera frame polling ──────────────────────────────────────────────────
 
     def _poll_cameras(self):
-        # RealSense D435
-        try:
-            item = self._rs_frame_q.get_nowait()
-            if isinstance(item[0], str):   # ("error", message) sentinel
-                self._log(f"[ERROR] RealSense worker: {item[1]}")
+        # RealSense D435 — poll directly on the main thread (no worker thread).
+        # wait_for_frames(timeout_ms=1) returns immediately if no frame is ready,
+        # avoiding all GIL / daemon-thread delivery issues on Windows.
+        if self._rs_pipeline is not None:
+            try:
+                frameset    = self._rs_pipeline.wait_for_frames(timeout_ms=1)
+                depth_frame = frameset.get_depth_frame()
+                color_frame = frameset.get_color_frame()
+                if depth_frame and color_frame:
+                    depth_colorized = np.asanyarray(
+                        self._rs_colorizer.colorize(depth_frame).get_data()
+                    ).copy()
+                    color_rgb = np.asanyarray(color_frame.get_data()).copy()
+                    depth_m   = np.asanyarray(
+                        depth_frame.get_data()
+                    ).astype(np.float32) / 1000.0
+                    depth_m[depth_m == 0] = np.nan
+                    self._last_depth_m   = depth_m
+                    self._last_grayscale = color_rgb
+                    self._last_depth_rgb = depth_colorized
+                    self._draw(self._depth_canvas, depth_colorized, RS_W, RS_H)
+                    self._draw(self._gray_canvas,  color_rgb,       RS_W, RS_H)
+            except RuntimeError:
+                pass   # no frame ready within 1 ms — normal between frames
+            except Exception as e:
+                self._log(f"[ERROR] RealSense: {e}")
                 self._disconnect_rs()
-            else:
-                depth_colorized, color_rgb, depth_m = item
-                self._last_depth_m   = depth_m
-                self._last_grayscale = color_rgb
-                self._last_depth_rgb = depth_colorized
-                self._draw(self._depth_canvas, depth_colorized, RS_W, RS_H)
-                self._draw(self._gray_canvas,  color_rgb,       RS_W, RS_H)
-        except queue.Empty:
-            pass
-        except Exception as e:
-            self._log(f"[ERROR] Poll error: {e}")
 
         # ArduCam
         if self._arducam is not None:
@@ -1317,7 +1318,7 @@ class ExperimentApp(tk.Tk):
         # ── Project ───────────────────────────────────────────────────────────
         self._log(f"[INFO ] Projecting at altitude {altitude_mm:.1f} mm...")
         try:
-            model = TauProjectionModel(self._cfg.tau_sensor, altitude_mm)
+            model = RealSenseProjectionModel(self._cfg.realsense, altitude_mm)
             patch, x_grid, y_grid = model.project_depth(depth_m, altitude_mm)
         except Exception as e:
             self._log(f"[ERROR] Projection failed: {e}")
@@ -1347,26 +1348,21 @@ class ExperimentApp(tk.Tk):
         z_rgb_img = (z_rgba[:, :, :3] * 255).astype(np.uint8)
         z_rgb_img[~surviving] = [17, 17, 27]   # dark for invalid pixels
 
-        # ── Camera settings at snap time ──────────────────────────────────────
-        int_3d  = self._tau_settings["Integration Time 3D"].get()
-        int_gs  = self._tau_settings["Integration Time GS"].get()
-        min_amp = self._tau_settings["Min Amplitude"].get()
-
         # ── Build window ──────────────────────────────────────────────────────
         self._close_snap_window()
         win = tk.Toplevel(self)
-        win.title("Tau LiDAR — Debug Snapshot")
+        win.title("RealSense D435 — Debug Snapshot")
         win.configure(bg="#1e1e2e")
         win.protocol("WM_DELETE_WINDOW", self._close_snap_window)
         self._snap_window = win
 
         # ── Top: three PIL/ImageTk canvases (same style as live preview) ─────
-        SNAP_W, SNAP_H = 480, 180   # 160×60 at 3× scale
+        SNAP_W, SNAP_H = 320, 240   # 640×480 at 0.5× scale
         img_outer = tk.Frame(win, bg="#1e1e2e")
         img_outer.pack(fill=tk.X, padx=4, pady=(4, 2))
 
         for label_text, arr in [
-            ("Grayscale", np.stack([grayscale] * 3, axis=-1)),
+            ("Color (RGB)", color_rgb),
             ("Depth colormap (camera)", depth_rgb),
             (f"Filtered Z  [{vmin_z:.0f} – {vmax_z:.0f} mm]", z_rgb_img),
         ]:
@@ -1402,9 +1398,9 @@ class ExperimentApp(tk.Tk):
             f"Max:        {raw_max:.1f}\n"
             "\n"
             "── Filtered pixels ─────────\n"
-            f"Total:      {total_px}  (160×60)\n"
+            f"Total:      {total_px}  ({_W}×{_H})\n"
             f"NaN:        {nan_px}  ({100*nan_px/total_px:.1f}%)\n"
-            f"            low amp/saturation\n"
+            f"            invalid/out-of-range\n"
             f"<{min_range_cfg:.0f} mm:   {n_close}  ({100*n_close/total_px:.1f}%)\n"
             f"            near-field phantom\n"
             f">{max_z_m*1000:.0f} mm:  {n_far}  ({100*n_far/total_px:.1f}%)\n"
@@ -1425,10 +1421,9 @@ class ExperimentApp(tk.Tk):
             f"Elev max:   {elev_max:.1f}\n"
             "\n"
             "── Camera settings ─────────\n"
-            f"Int 3D:     {int_3d}\n"
-            f"Int GS:     {int_gs}\n"
-            f"Min amp:    {min_amp}\n"
-            f"Port:       {self._tau_port_var.get()}"
+            f"Emitter:    {self._rs_settings['Emitter Power'].get()}\n"
+            f"Exposure:   {self._rs_settings['Exposure (µs)'].get()} µs\n"
+            f"Serial:     {self._rs_serial}"
         )
         n_lines = stats_text.count("\n") + 1
 
@@ -1493,7 +1488,7 @@ class ExperimentApp(tk.Tk):
         self.after_cancel(self._after_id)
         if self._track_runner is not None:
             self._track_runner.stop()
-        self._disconnect_tau()
+        self._disconnect_rs()
         self._disconnect_arducam()
         self._disconnect_gantry()
         super().destroy()

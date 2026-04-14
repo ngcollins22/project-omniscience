@@ -55,7 +55,9 @@ realsense_sensor:
   # Sensor geometry (D435 depth module)
   resolution_x:          640
   resolution_y:          480
-  fps:                   30
+  fps:                   6      # 6fps: ~9 MB/s total, works on any USB port incl. 2.0
+                               # 15fps: ~23 MB/s, needs USB 3.0
+                               # 30fps: ~46 MB/s, needs USB 3.1 Gen1 (blue/USB-C)
   fov_x_deg:             87.0   # horizontal full-angle FOV (D435 spec ±3°)
   fov_y_deg:             58.0   # vertical full-angle FOV (D435 spec ±1°)
   min_range_mm:          280    # D435 hardware minimum reliable depth
