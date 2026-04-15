@@ -4,6 +4,7 @@ import matplotlib.patches as patches
 import numpy as np
 import os 
 import time
+import pandas as pd
 
 # Code largely sourced from https://docs.opencv.org/4.x/d1/d89/tutorial_py_orb.html,  https://docs.opencv.org/4.x/dc/dc3/tutorial_py_matcher.html, 
 # and https://docs.opencv.org/4.x/d1/de0/tutorial_py_feature_homography.html
@@ -14,8 +15,8 @@ import time
 
 def ORB():
     root = os.getcwd()
-    img1Path = os.path.join(root, "mars_cropped_4k_1.jpg") #query image
-    img2Path = os.path.join(root, "mars_4k_color.jpg") #training image
+    img1Path = os.path.join(root, "WholeTang.tif") #query image
+    img2Path = os.path.join(root, "mars_12k_color.jpg") #training image
     #download image here https://planetpixelemporium.com/mars5672.html#
     #crop it for the query
     # Seems to work best when the resolution of both images are the same, so we need to use 4k i think to match arducam
@@ -81,7 +82,7 @@ def ORB():
 
     
     #visualize keypoints on train image. toggle on or off below
-    toggleKpPlot = True
+    toggleKpPlot = False
     if toggleKpPlot:
         kpPlotImg= cv.drawKeypoints(img2, kp2, img2, color=(0,255,0), flags=cv.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
         plt.figure()
@@ -238,10 +239,40 @@ def simulatedExperiment():
 
 
 
+def postProcess(folderFilePath, BLx, BLy, TRx, TRy, numfeatures=50000):
+    csvpath = folderFilePath+"\session.csv"
+    df = pd.read_csv(csvpath)
+    #print(df.head())
+    centerlist=[]
+    for row in df.iterrows():
+        img1filepath = folderFilePath  +"\\"+ str.strip(row['filepath'])
+        print(img1filepath)
+        img1 = cv.imread(img1filepath, cv.IMREAD_GRAYSCALE)
 
+        (center, refRes) = getPosePixelCords(img1, numfeatures)
+        centerlist.append(center)
+    plt.figure()
+
+    estimatedx = [row[0] for row in centerlist]
+    estimatedy = [row[1] for row in centerlist]
+    plt.plot(estimatedx,estimatedy, color='green')
+    img2 = cv.imread(".\Experiments\mars_4k_color.jpg", cv.IMREAD_COLOR)
+    img2 = cv.cvtColor(img2, cv.COLOR_BGR2RGB)
+    plt.imshow(img2)
+
+    gantryx = df['x_mm']
+
+
+
+
+
+    
     
 
 if __name__ == '__main__':
-    #ORB()
+    ORB()
     #print(getPosePixelCords("mars_cropped_4k_1.jpg"))
-    simulatedExperiment()
+    #simulatedExperiment()
+    #postProcess(r".\sessions\20260406_215542", -378, -788, 23, -3)
+
+    
