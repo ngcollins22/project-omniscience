@@ -170,6 +170,51 @@ class ORBWorker(threading.Thread):
             self.result_q.put_nowait(("err", str(e)))
 
 
+# ── Background worker: runs LiDAR localization on a single frame ─────────────
+class LidarLocWorker(threading.Thread):
+    """
+    Receives one color frame (RGB uint8) and depth map (float32 metres, NaN=invalid),
+    runs the custom localization algorithm, and puts the result onto result_q.
+
+    result_q items are either:
+        ("ok",  x_mm, y_mm)   – estimated gantry position in mm
+        ("err", error_string) – failure
+    """
+
+    def __init__(self,
+                 color_rgb: np.ndarray,
+                 depth_m:   np.ndarray,
+                 result_q:  queue.Queue):
+        super().__init__(daemon=True)
+        self.color_rgb = color_rgb
+        self.depth_m   = depth_m
+        self.result_q  = result_q
+
+    def run(self):
+        try:
+            x_mm, y_mm = self._localize(self.color_rgb, self.depth_m)
+            self.result_q.put_nowait(("ok", x_mm, y_mm))
+        except Exception as e:
+            self.result_q.put_nowait(("err", str(e)))
+
+    @staticmethod
+    def _localize(color_rgb: np.ndarray,
+                  depth_m:   np.ndarray) -> tuple[float, float]:
+        """
+        TODO: implement custom localization here.
+
+        Parameters
+        ----------
+        color_rgb : (H, W, 3) uint8   — RealSense color frame (RGB order)
+        depth_m   : (H, W) float32    — depth in metres; NaN = invalid pixel
+
+        Returns
+        -------
+        (x_mm, y_mm) : estimated gantry position in machine coordinates (mm)
+        """
+        raise NotImplementedError("LidarLocWorker._localize() not yet implemented")
+
+
 # ── Main application ──────────────────────────────────────────────────────────
 class ExperimentApp(tk.Tk):
 
@@ -183,8 +228,8 @@ class ExperimentApp(tk.Tk):
 
         # Device handles
         self._rs_pipeline  = None
-        self._rs_worker    = None
-        self._rs_frame_q   = queue.Queue(maxsize=2)
+        self._rs_sensor    = None      # depth sensor handle for set_option()
+        self._rs_colorizer = None      # rs.colorizer instance
         self._rs_serial    = ""        # serial number shown after connect
         self._arducam      = None
 
@@ -203,6 +248,12 @@ class ExperimentApp(tk.Tk):
         self._map_br_var      = tk.StringVar(value="—")
         self._map_tl_var      = tk.StringVar(value="—")
         self._map_size_var    = tk.StringVar(value="—")
+        # Lat/lon bounds of the full printed map (user-entered in Map Calibration section)
+        self._map_lat_min_var = tk.StringVar(value="")
+        self._map_lat_max_var = tk.StringVar(value="")
+        self._map_lon_min_var = tk.StringVar(value="")
+        self._map_lon_max_var = tk.StringVar(value="")
+        self._map_calibration = None              # MapCalibration, built when corners + bounds known
         self._gt_source_var   = tk.StringVar(value="synthetic")
         self._gt_csv_path_var = tk.StringVar(value="")
         self._gt_n_var        = tk.StringVar(value="50")
@@ -240,6 +291,34 @@ class ExperimentApp(tk.Tk):
         self._record_count_var   = tk.StringVar(value="0")
         self._record_status_var  = tk.StringVar(value="Idle")
         self._session_path_var   = tk.StringVar(value="—")
+
+        # ── LiDAR recording state ─────────────────────────────────────────────
+        self._lidar_recording           = False
+        self._lidar_session_dir         = None
+        self._lidar_frames_dir          = None
+        self._lidar_session_csv_path    = None
+        self._lidar_session_csv_file    = None
+        self._lidar_session_csv_writer  = None
+        self._lidar_record_frame_count  = 0
+        self._lidar_last_capture_time   = 0.0
+        self._lidar_record_fps_var      = tk.IntVar(value=DEFAULT_RECORD_FPS)
+        self._lidar_record_count_var    = tk.StringVar(value="0")
+        self._lidar_record_status_var   = tk.StringVar(value="Idle")
+        self._lidar_session_path_var    = tk.StringVar(value="—")
+
+        # ── LiDAR localization state ──────────────────────────────────────────
+        self._lidar_loc_running    = False
+        self._lidar_loc_worker     = None          # current LidarLocWorker (or None)
+        self._lidar_loc_result_q   = queue.Queue() # worker → main thread
+        self._lidar_loc_frame_count = 0
+        self._lidar_loc_est_gx_var = tk.StringVar(value="—")
+        self._lidar_loc_est_gy_var = tk.StringVar(value="—")
+        self._lidar_loc_gt_gx_var  = tk.StringVar(value="—")
+        self._lidar_loc_gt_gy_var  = tk.StringVar(value="—")
+        self._lidar_loc_status_var = tk.StringVar(value="Idle")
+        self._lidar_loc_count_var  = tk.StringVar(value="0")
+        self._lidar_loc_history_est = []   # list of (x_mm, y_mm) estimates
+        self._lidar_loc_history_gt  = []   # list of (x_mm, y_mm) gantry ground truth
 
         # ── ORB localization state ────────────────────────────────────────────
         self._orb_running      = False          # True while the loop is active
@@ -400,7 +479,7 @@ class ExperimentApp(tk.Tk):
                   **self._btn(fg="#89b4fa")).pack(side=tk.LEFT)
 
         pos_row = tk.Frame(cal_sec, bg="#181825")
-        pos_row.pack(anchor="w", padx=10, pady=(0, 6))
+        pos_row.pack(anchor="w", padx=10, pady=(0, 4))
         for label, var in [("BR:", self._map_br_var),
                            ("TL:", self._map_tl_var),
                            ("Map:", self._map_size_var)]:
@@ -409,6 +488,25 @@ class ExperimentApp(tk.Tk):
             tk.Label(pos_row, textvariable=var, bg="#181825", fg="#cdd6f4",
                      font=("Consolas", 8), width=22, anchor="w"
                      ).pack(side=tk.LEFT, padx=(0, 12))
+
+        tk.Label(cal_sec,
+                 text="Map lat/lon bounds  (full printed map, not track extents):",
+                 bg="#181825", fg="#a6adc8", font=("Consolas", 8)
+                 ).pack(anchor="w", padx=10, pady=(4, 2))
+
+        bounds_row = tk.Frame(cal_sec, bg="#181825")
+        bounds_row.pack(anchor="w", padx=10, pady=(0, 8))
+        for lbl, var in [("Lat min:", self._map_lat_min_var),
+                         ("Lat max:", self._map_lat_max_var),
+                         ("Lon min:", self._map_lon_min_var),
+                         ("Lon max:", self._map_lon_max_var)]:
+            tk.Label(bounds_row, text=lbl, bg="#181825", fg="#a6adc8",
+                     font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 2))
+            e = tk.Entry(bounds_row, textvariable=var, width=8,
+                         bg="#313244", fg="#cdd6f4", insertbackground="#cdd6f4",
+                         font=("Consolas", 9), relief=tk.FLAT)
+            e.pack(side=tk.LEFT, padx=(0, 12))
+            var.trace_add("write", lambda *_: self._rebuild_map_calibration())
 
         # ── Ground Track ──────────────────────────────────────────────────
         gt_sec = self._section(tab_content, "Ground Track")
@@ -544,6 +642,73 @@ class ExperimentApp(tk.Tk):
                   **self._btn()).grid(row=len(fields), column=0, columnspan=3,
                                      padx=8, pady=(6, 4), sticky="w")
 
+        # Recording
+        rec_sec = self._section(tab_content, "Recording")
+
+        rec_ctrl_row = tk.Frame(rec_sec, bg="#181825")
+        rec_ctrl_row.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        self._lidar_rec_toggle_btn = tk.Button(
+            rec_ctrl_row, text="⏺  Start Recording",
+            command=self._toggle_lidar_recording,
+            bg="#1e6640", fg="#a6e3a1", activebackground="#2a7a50",
+            font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=12, pady=5, width=18)
+        self._lidar_rec_toggle_btn.pack(side=tk.LEFT, padx=(0, 16))
+
+        tk.Label(rec_ctrl_row, text="Status:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        self._lidar_rec_status_lbl = tk.Label(
+            rec_ctrl_row, textvariable=self._lidar_record_status_var,
+            bg="#181825", fg="#585b70",
+            font=("Consolas", 8, "bold"), width=10, anchor="w")
+        self._lidar_rec_status_lbl.pack(side=tk.LEFT, padx=(3, 20))
+
+        tk.Label(rec_ctrl_row, text="Saved:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        tk.Label(rec_ctrl_row, textvariable=self._lidar_record_count_var,
+                 bg="#181825", fg="#cdd6f4",
+                 font=("Consolas", 8, "bold"), width=7, anchor="w"
+                 ).pack(side=tk.LEFT, padx=(3, 4))
+        tk.Label(rec_ctrl_row, text="frames", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+
+        fps_row = tk.Frame(rec_sec, bg="#181825")
+        fps_row.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        tk.Label(fps_row, text="Capture FPS:", bg="#181825", fg="#a6adc8",
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self._lidar_fps_slider = tk.Scale(
+            fps_row, from_=1, to=30,
+            orient=tk.HORIZONTAL, length=200,
+            variable=self._lidar_record_fps_var,
+            command=self._on_lidar_fps_slider,
+            bg="#181825", fg="#cdd6f4",
+            troughcolor="#313244", activebackground="#45475a",
+            highlightthickness=0, relief=tk.FLAT,
+            font=("Consolas", 8))
+        self._lidar_fps_slider.pack(side=tk.LEFT, padx=(0, 6))
+
+        tk.Entry(fps_row, textvariable=self._lidar_record_fps_var, width=4,
+                 bg="#313244", fg="#cdd6f4", insertbackground="#cdd6f4",
+                 font=("Consolas", 9), relief=tk.FLAT).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Label(fps_row, text="fps", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 16))
+        tk.Label(fps_row,
+                 text="(GUI preview always runs at 20 Hz regardless)",
+                 bg="#181825", fg="#585b70",
+                 font=("Consolas", 8, "italic")).pack(side=tk.LEFT)
+
+        path_row = tk.Frame(rec_sec, bg="#181825")
+        path_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        tk.Label(path_row, text="Session:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        tk.Label(path_row, textvariable=self._lidar_session_path_var,
+                 bg="#181825", fg="#89b4fa",
+                 font=("Consolas", 8), anchor="w"
+                 ).pack(side=tk.LEFT, padx=(6, 0))
+
         # Preview
         preview = self._section(tab_content, "Preview")
         preview.columnconfigure(0, weight=1)
@@ -578,6 +743,58 @@ class ExperimentApp(tk.Tk):
 
         tk.Button(snap_sec, text="Snap & Plot 3D", command=self._snap_and_plot,
                   **self._btn(fg="#89b4fa")).grid(row=0, column=2, padx=(8, 8), pady=6)
+
+        # Localization
+        loc_sec = self._section(tab_content, "Localization")
+
+        loc_ctrl_row = tk.Frame(loc_sec, bg="#181825")
+        loc_ctrl_row.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        self._lidar_loc_start_btn = tk.Button(
+            loc_ctrl_row, text="▶  Start Localization",
+            command=self._start_lidar_loc,
+            bg="#1e6640", fg="#a6e3a1", activebackground="#2a7a50",
+            font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=10, pady=4)
+        self._lidar_loc_start_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._lidar_loc_stop_btn = tk.Button(
+            loc_ctrl_row, text="■  Stop",
+            command=self._stop_lidar_loc,
+            bg="#6e2020", fg="#f38ba8", activebackground="#7e3030",
+            font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=10, pady=4,
+            state=tk.DISABLED)
+        self._lidar_loc_stop_btn.pack(side=tk.LEFT, padx=(0, 16))
+
+        tk.Label(loc_ctrl_row, text="Status:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        self._lidar_loc_status_lbl = tk.Label(
+            loc_ctrl_row, textvariable=self._lidar_loc_status_var,
+            bg="#181825", fg="#a6adc8",
+            font=("Consolas", 8, "bold"), width=14, anchor="w")
+        self._lidar_loc_status_lbl.pack(side=tk.LEFT, padx=(3, 16))
+
+        tk.Label(loc_ctrl_row, text="Frames:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        tk.Label(loc_ctrl_row, textvariable=self._lidar_loc_count_var,
+                 bg="#181825", fg="#cdd6f4",
+                 font=("Consolas", 8), width=6, anchor="w"
+                 ).pack(side=tk.LEFT, padx=(3, 0))
+
+        loc_readout_row = tk.Frame(loc_sec, bg="#181825")
+        loc_readout_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        for lbl_text, var, fg_col in (
+            ("Est X mm:", self._lidar_loc_est_gx_var, "#cba6f7"),
+            ("Est Y mm:", self._lidar_loc_est_gy_var, "#cba6f7"),
+            ("GT X mm:",  self._lidar_loc_gt_gx_var,  "#a6e3a1"),
+            ("GT Y mm:",  self._lidar_loc_gt_gy_var,  "#a6e3a1"),
+        ):
+            tk.Label(loc_readout_row, text=lbl_text, bg="#181825", fg="#585b70",
+                     font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 2))
+            tk.Label(loc_readout_row, textvariable=var,
+                     bg="#181825", fg=fg_col,
+                     font=("Consolas", 8, "bold"), width=10, anchor="w"
+                     ).pack(side=tk.LEFT, padx=(0, 14))
 
         return tab
 
@@ -1160,7 +1377,7 @@ class ExperimentApp(tk.Tk):
             self._session_csv_file   = open(self._session_csv_path, "w", newline="")
             self._session_csv_writer = csv.writer(self._session_csv_file)
             self._session_csv_writer.writerow(
-                ["timestamp_s", "filepath", "x_mm", "y_mm", "z_mm"])
+                ["timestamp_s", "filepath", "lat_deg", "lon_deg"])
         except OSError as e:
             self._log(f"[ERROR] Could not open CSV files: {e}")
             return
@@ -1231,23 +1448,238 @@ class ExperimentApp(tk.Tk):
             return
 
         # ── Write single combined CSV row ────────────────────────────────
-        gx = gy = gz = float("nan")
-        if self._gantry_worker is not None:
+        lat = lon = float("nan")
+        if self._gantry_worker is not None and self._map_calibration is not None:
             try:
                 pos, _ = self._gantry_worker.get_position()
-                gx, gy, gz = pos["x"], pos["y"], pos["z"]
+                lat, lon = self._map_calibration.to_lat_lon(pos["x"], pos["y"])
             except Exception:
                 pass
         try:
             self._session_csv_writer.writerow(
                 [f"{wall_ts:.6f}", rel_path,
-                 f"{gx:.4f}", f"{gy:.4f}", f"{gz:.4f}"])
+                 f"{lat:.6f}", f"{lon:.6f}"])
         except Exception as e:
             self._log(f"[ERROR] session.csv write failed: {e}")
 
         # ── Update counter ───────────────────────────────────────────────
         self._record_frame_count += 1
         self._record_count_var.set(str(self._record_frame_count))
+
+    # ── LiDAR recording ───────────────────────────────────────────────────────
+
+    def _toggle_lidar_recording(self) -> None:
+        if self._lidar_recording:
+            self._stop_lidar_recording()
+        else:
+            self._start_lidar_recording()
+
+    def _start_lidar_recording(self) -> None:
+        if self._rs_pipeline is None:
+            self._log("[WARN ] LiDAR Recording: RealSense not connected.")
+            return
+
+        session_name = time.strftime("lidar_%Y%m%d_%H%M%S")
+        self._lidar_session_dir  = os.path.join(SESSIONS_ROOT, session_name)
+        self._lidar_frames_dir   = os.path.join(self._lidar_session_dir, "frames")
+        os.makedirs(self._lidar_frames_dir, exist_ok=True)
+
+        self._lidar_session_csv_path = os.path.join(self._lidar_session_dir, "session.csv")
+        try:
+            self._lidar_session_csv_file   = open(self._lidar_session_csv_path, "w", newline="")
+            self._lidar_session_csv_writer = csv.writer(self._lidar_session_csv_file)
+            self._lidar_session_csv_writer.writerow(
+                ["timestamp_s", "color_path", "depth_path", "lat_deg", "lon_deg"])
+        except OSError as e:
+            self._log(f"[ERROR] LiDAR Recording: could not open CSV: {e}")
+            return
+
+        self._lidar_recording           = True
+        self._lidar_record_frame_count  = 0
+        self._lidar_last_capture_time   = 0.0
+        self._lidar_record_count_var.set("0")
+        self._lidar_record_status_var.set("● Recording")
+        self._lidar_rec_status_lbl.configure(fg="#f38ba8")
+        self._lidar_session_path_var.set(self._lidar_session_dir)
+        self._lidar_rec_toggle_btn.configure(
+            text="■  Stop Recording",
+            bg="#6e2020", fg="#f38ba8", activebackground="#7e3030")
+
+        self._log(f"[OK   ] LiDAR recording started → {self._lidar_session_dir}")
+
+    def _stop_lidar_recording(self) -> None:
+        self._lidar_recording = False
+
+        if self._lidar_session_csv_file is not None:
+            try:
+                self._lidar_session_csv_file.flush()
+                self._lidar_session_csv_file.close()
+            except OSError:
+                pass
+        self._lidar_session_csv_file   = None
+        self._lidar_session_csv_writer = None
+
+        self._lidar_record_status_var.set("Idle")
+        self._lidar_rec_status_lbl.configure(fg="#585b70")
+        self._lidar_rec_toggle_btn.configure(
+            text="⏺  Start Recording",
+            bg="#1e6640", fg="#a6e3a1", activebackground="#2a7a50")
+
+        self._log(
+            f"[OK   ] LiDAR recording stopped — {self._lidar_record_frame_count} frames "
+            f"saved to {self._lidar_session_dir}"
+        )
+
+    def _maybe_capture_lidar_frame(self,
+                                   color_rgb: np.ndarray,
+                                   depth_m:   np.ndarray) -> None:
+        if not self._lidar_recording:
+            return
+
+        now = time.monotonic()
+        target_interval = 1.0 / max(self._lidar_record_fps_var.get(), 1)
+        if (now - self._lidar_last_capture_time) < target_interval:
+            return
+
+        self._lidar_last_capture_time = now
+        wall_ts = time.time()
+
+        base_name   = f"{wall_ts:.6f}"
+        color_fname = base_name + ".jpg"
+        depth_fname = base_name + "_depth.png"
+        color_rel   = os.path.join("frames", color_fname)
+        depth_rel   = os.path.join("frames", depth_fname)
+        color_abs   = os.path.join(self._lidar_frames_dir, color_fname)
+        depth_abs   = os.path.join(self._lidar_frames_dir, depth_fname)
+
+        try:
+            cv2.imwrite(color_abs, cv2.cvtColor(color_rgb, cv2.COLOR_RGB2BGR))
+        except Exception as e:
+            self._log(f"[ERROR] LiDAR: color frame save failed: {e}")
+            return
+
+        try:
+            depth_mm = np.where(np.isfinite(depth_m),
+                                (depth_m * 1000.0).astype(np.uint16),
+                                np.uint16(0))
+            cv2.imwrite(depth_abs, depth_mm)
+        except Exception as e:
+            self._log(f"[ERROR] LiDAR: depth frame save failed: {e}")
+            return
+
+        lat = lon = float("nan")
+        if self._gantry_worker is not None and self._map_calibration is not None:
+            try:
+                pos, _ = self._gantry_worker.get_position()
+                lat, lon = self._map_calibration.to_lat_lon(pos["x"], pos["y"])
+            except Exception:
+                pass
+
+        try:
+            self._lidar_session_csv_writer.writerow(
+                [f"{wall_ts:.6f}", color_rel, depth_rel,
+                 f"{lat:.6f}", f"{lon:.6f}"])
+        except Exception as e:
+            self._log(f"[ERROR] LiDAR: session.csv write failed: {e}")
+
+        self._lidar_record_frame_count += 1
+        self._lidar_record_count_var.set(str(self._lidar_record_frame_count))
+
+    # ── LiDAR localization ────────────────────────────────────────────────────
+
+    def _start_lidar_loc(self) -> None:
+        if self._rs_pipeline is None:
+            self._log("[WARN ] LiDAR Loc: RealSense not connected.")
+            return
+        self._lidar_loc_running = True
+        self._lidar_loc_frame_count = 0
+        self._lidar_loc_count_var.set("0")
+        self._lidar_loc_history_est.clear()
+        self._lidar_loc_history_gt.clear()
+        self._lidar_loc_start_btn.configure(state=tk.DISABLED)
+        self._lidar_loc_stop_btn.configure(state=tk.NORMAL)
+        self._lidar_loc_status_var.set("Running")
+        self._lidar_loc_status_lbl.configure(fg="#a6e3a1")
+        self._log("[INFO ] LiDAR localization started.")
+        self._dispatch_lidar_loc()
+
+    def _stop_lidar_loc(self) -> None:
+        self._lidar_loc_running = False
+        self._lidar_loc_start_btn.configure(state=tk.NORMAL)
+        self._lidar_loc_stop_btn.configure(state=tk.DISABLED)
+        self._lidar_loc_status_var.set("Idle")
+        self._lidar_loc_status_lbl.configure(fg="#a6adc8")
+        self._log("[INFO ] LiDAR localization stopped.")
+
+    def _dispatch_lidar_loc(self) -> None:
+        """Start a LidarLocWorker for the most recent frame if none is running."""
+        if not self._lidar_loc_running:
+            return
+        if self._lidar_loc_worker is not None and self._lidar_loc_worker.is_alive():
+            return
+        if self._last_grayscale is None or self._last_depth_m is None:
+            self._log("[WARN ] LiDAR Loc: no frame available yet.")
+            return
+        self._lidar_loc_worker = LidarLocWorker(
+            self._last_grayscale.copy(),
+            self._last_depth_m.copy(),
+            self._lidar_loc_result_q,
+        )
+        self._lidar_loc_worker.start()
+        self._lidar_loc_status_var.set("Processing…")
+        self._lidar_loc_status_lbl.configure(fg="#fab387")
+
+    def _poll_lidar_loc(self) -> None:
+        """Drain the result queue and dispatch the next frame when the worker is done."""
+        try:
+            while True:
+                item = self._lidar_loc_result_q.get_nowait()
+                self._lidar_loc_handle_result(item)
+        except queue.Empty:
+            pass
+
+        if self._lidar_loc_running:
+            if self._lidar_loc_worker is None or not self._lidar_loc_worker.is_alive():
+                self._dispatch_lidar_loc()
+
+    def _lidar_loc_handle_result(self, item: tuple) -> None:
+        if item[0] == "err":
+            self._log(f"[WARN ] LiDAR Loc: {item[1]}")
+            if self._lidar_loc_running:
+                self._lidar_loc_status_var.set("Error")
+                self._lidar_loc_status_lbl.configure(fg="#f38ba8")
+            return
+
+        _, est_x_mm, est_y_mm = item
+
+        self._lidar_loc_frame_count += 1
+        self._lidar_loc_count_var.set(str(self._lidar_loc_frame_count))
+        self._lidar_loc_history_est.append((est_x_mm, est_y_mm))
+        self._lidar_loc_est_gx_var.set(f"{est_x_mm:.1f}")
+        self._lidar_loc_est_gy_var.set(f"{est_y_mm:.1f}")
+
+        if self._gantry_worker is not None:
+            try:
+                pos, _ = self._gantry_worker.get_position()
+                gt_x, gt_y = pos["x"], pos["y"]
+                self._lidar_loc_gt_gx_var.set(f"{gt_x:.1f}")
+                self._lidar_loc_gt_gy_var.set(f"{gt_y:.1f}")
+                self._lidar_loc_history_gt.append((gt_x, gt_y))
+            except Exception:
+                self._lidar_loc_gt_gx_var.set("no gantry")
+                self._lidar_loc_gt_gy_var.set("no gantry")
+        else:
+            self._lidar_loc_gt_gx_var.set("no gantry")
+            self._lidar_loc_gt_gy_var.set("no gantry")
+
+        self._log(
+            f"[LOC  ] frame {self._lidar_loc_frame_count}  "
+            f"est=({est_x_mm:.1f}, {est_y_mm:.1f}) mm"
+        )
+
+        if self._lidar_loc_running:
+            self._lidar_loc_status_var.set("Running")
+            self._lidar_loc_status_lbl.configure(fg="#a6e3a1")
 
     # ── FPS control ───────────────────────────────────────────────────────────
 
@@ -1256,6 +1688,13 @@ class ExperimentApp(tk.Tk):
         try:
             clamped = max(1, min(30, int(float(value))))
             self._record_fps_var.set(clamped)
+        except (ValueError, TypeError):
+            pass
+
+    def _on_lidar_fps_slider(self, value) -> None:
+        try:
+            clamped = max(1, min(30, int(float(value))))
+            self._lidar_record_fps_var.set(clamped)
         except (ValueError, TypeError):
             pass
 
@@ -1289,47 +1728,66 @@ class ExperimentApp(tk.Tk):
 
         cfg_rs = self._cfg.realsense
         self._log("[INFO ] Starting RealSense pipeline...")
-        try:
-            pipeline = rs.pipeline()
-            rs_cfg   = rs.config()
-            rs_cfg.enable_stream(rs.stream.depth, cfg_rs.resolution_x, cfg_rs.resolution_y,
-                                 rs.format.z16,  cfg_rs.fps)
-            rs_cfg.enable_stream(rs.stream.color, cfg_rs.resolution_x, cfg_rs.resolution_y,
-                                 rs.format.bgr8, cfg_rs.fps)
-            profile  = pipeline.start(rs_cfg)
-            dev      = profile.get_device()
-            serial   = dev.get_info(rs.camera_info.serial_number)
-            name     = dev.get_info(rs.camera_info.name)
-            fw       = dev.get_info(rs.camera_info.firmware_version)
-            self._log(f"[OK   ] {name}  serial={serial}  fw={fw}")
-            self._rs_pipeline = pipeline
-            self._rs_serial   = serial
-            self._rs_serial_var.set(serial)
-            self._set_status("LiDAR", True)
-        except Exception as e:
-            self._log(f"[ERROR] {e}")
-            return
 
-        self._rs_frame_q = queue.Queue(maxsize=2)
-        self._rs_worker  = RealSenseWorker(self._rs_pipeline, self._rs_frame_q)
-        self._rs_worker.start()
+        # pipeline.start() can block for several seconds — run off the main thread
+        # so Tkinter stays responsive.  GUI updates are scheduled back via after().
+        def _do_start():
+            try:
+                pipeline = rs.pipeline()
+                rs_cfg   = rs.config()
+                rs_cfg.enable_stream(rs.stream.depth,
+                                     cfg_rs.resolution_x, cfg_rs.resolution_y,
+                                     rs.format.z16,  cfg_rs.fps)
+                rs_cfg.enable_stream(rs.stream.color,
+                                     cfg_rs.resolution_x, cfg_rs.resolution_y,
+                                     rs.format.rgb8, cfg_rs.fps)
+                profile    = pipeline.start(rs_cfg)
+                dev        = profile.get_device()
+                sensor     = dev.first_depth_sensor()
+                colorizer  = rs.colorizer()
+                serial     = dev.get_info(rs.camera_info.serial_number)
+                name       = dev.get_info(rs.camera_info.name)
+                fw         = dev.get_info(rs.camera_info.firmware_version)
+                self.after(0, lambda: self._on_rs_connected(
+                    pipeline, sensor, colorizer, serial, name, fw))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self._log(f"[ERROR] Connect failed: {err}"))
+
+        threading.Thread(target=_do_start, daemon=True).start()
+
+    def _on_rs_connected(self, pipeline, sensor, colorizer, serial, name, fw):
+        """Called on the main thread once pipeline.start() succeeds."""
+        self._log(f"[OK   ] {name}  serial={serial}  fw={fw}")
+        self._rs_pipeline  = pipeline
+        self._rs_sensor    = sensor
+        self._rs_colorizer = colorizer
+        self._rs_serial    = serial
+        self._rs_serial_var.set(serial)
+        self._set_status("LiDAR", True)
 
     def _disconnect_rs(self):
-        if self._rs_worker:
-            self._rs_worker.stop()
-            self._rs_worker = None
-        if self._rs_pipeline:
-            try:
-                self._rs_pipeline.stop()
-            except Exception:
-                pass
-            self._rs_pipeline = None
-            self._log("[INFO ] RealSense disconnected.")
+        # Clear handles immediately so polling stops and GUI is responsive.
+        # pipeline.stop() can block for seconds, so run it in the background.
+        pipeline = self._rs_pipeline
+        self._rs_pipeline  = None
+        self._rs_sensor    = None
+        self._rs_colorizer = None
         self._rs_serial_var.set("—")
         self._set_status("LiDAR", False)
 
+        if pipeline:
+            self._log("[INFO ] RealSense disconnecting...")
+            def _do_stop():
+                try:
+                    pipeline.stop()
+                except Exception:
+                    pass
+                self.after(0, lambda: self._log("[INFO ] RealSense disconnected."))
+            threading.Thread(target=_do_stop, daemon=True).start()
+
     def _apply_rs_settings(self):
-        if self._rs_pipeline is None:
+        if self._rs_sensor is None:
             self._log("[WARN ] Not connected — connect first.")
             return
         try:
@@ -1338,19 +1796,20 @@ class ExperimentApp(tk.Tk):
         except ValueError:
             self._log("[ERROR] Settings must be integers.")
             return
+        # Both calls happen on the main thread between poll cycles — no deadlock risk
+        # because wait_for_frames() is also on the main thread (Tkinter is single-threaded).
         try:
-            sensor = self._rs_pipeline.get_active_profile().get_device().first_depth_sensor()
-            sensor.set_option(rs.option.emitter_enabled, 1)
-            sensor.set_option(rs.option.laser_power, power)
+            self._rs_sensor.set_option(rs.option.emitter_enabled, 1)
+            self._rs_sensor.set_option(rs.option.laser_power, power)
             if exposure == 0:
-                sensor.set_option(rs.option.enable_auto_exposure, 1)
-                self._log(f"[OK   ] Emitter power: {power}, exposure: auto")
+                self._rs_sensor.set_option(rs.option.enable_auto_exposure, 1)
+                self._log(f"[OK   ] Settings applied — emitter power: {power}, exposure: auto")
             else:
-                sensor.set_option(rs.option.enable_auto_exposure, 0)
-                sensor.set_option(rs.option.exposure, exposure)
-                self._log(f"[OK   ] Emitter power: {power}, exposure: {exposure} µs")
+                self._rs_sensor.set_option(rs.option.enable_auto_exposure, 0)
+                self._rs_sensor.set_option(rs.option.exposure, exposure)
+                self._log(f"[OK   ] Settings applied — emitter power: {power}, exposure: {exposure} µs")
         except Exception as e:
-            self._log(f"[ERROR] {e}")
+            self._log(f"[ERROR] Apply settings failed: {e}")
 
     # ── ArduCam connection ────────────────────────────────────────────────────
 
@@ -1669,27 +2128,42 @@ class ExperimentApp(tk.Tk):
             corner_tl = (0.0, 0.0)
             self._log("[WARN ] No calibration recorded — using config travel limits.")
 
-        region = self._get_dem_region_bounds()
-        if region is None:
-            # No dem.region in config — derive bounds from the loaded track
-            if self._ground_track and len(self._ground_track) > 0:
-                lats = [wp.lat_deg for wp in self._ground_track.waypoints]
-                lons = [wp.lon_deg for wp in self._ground_track.waypoints]
-                region = DemRegionBounds(
-                    lat_min_deg=min(lats),
-                    lat_max_deg=max(lats),
-                    lon_min_deg=min(lons),
-                    lon_max_deg=max(lons),
-                )
+        # Resolve region: UI-entered bounds take precedence over dem.region config.
+        # We do NOT fall back to track extents — the physical corners always represent
+        # the full map regardless of how much of the map the ground track covers.
+        region = None
+        try:
+            lat_min = float(self._map_lat_min_var.get())
+            lat_max = float(self._map_lat_max_var.get())
+            lon_min = float(self._map_lon_min_var.get())
+            lon_max = float(self._map_lon_max_var.get())
+            region = DemRegionBounds(
+                lat_min_deg=lat_min, lat_max_deg=lat_max,
+                lon_min_deg=lon_min, lon_max_deg=lon_max,
+            )
+            self._log(
+                f"[INFO ] Using UI map bounds: "
+                f"lat [{lat_min:.3f}, {lat_max:.3f}]  lon [{lon_min:.3f}, {lon_max:.3f}]"
+            )
+        except ValueError:
+            region = self._get_dem_region_bounds()
+            if region is not None:
                 self._log(
-                    f"[INFO ] dem.region not configured — using track extent: "
+                    f"[INFO ] Using dem.region config bounds: "
                     f"lat [{region.lat_min_deg:.3f}, {region.lat_max_deg:.3f}]  "
                     f"lon [{region.lon_min_deg:.3f}, {region.lon_max_deg:.3f}]"
                 )
-            else:
-                region = DemRegionBounds(0.0, 1.0, 0.0, 1.0)
+
+        if region is None:
+            self._log(
+                "[ERROR] Map lat/lon bounds not set. "
+                "Enter Lat min/max and Lon min/max in the Map Calibration section "
+                "before running."
+            )
+            return
 
         cal = MapCalibration(corner_br=corner_br, corner_tl=corner_tl, region=region)
+        self._map_calibration = cal   # keep a reference for CSV lat/lon export
 
         try:
             speed = float(self._gt_speed_var.get())
@@ -1745,6 +2219,7 @@ class ExperimentApp(tk.Tk):
         self._map_br_var.set(f"X={pos['x']:.2f}  Y={pos['y']:.2f}")
         self._log(f"[INFO ] Map corner BR recorded: X={pos['x']:.2f} Y={pos['y']:.2f} mm")
         self._update_map_size_display()
+        self._rebuild_map_calibration()
 
     def _record_corner_tl(self) -> None:
         if self._gantry_worker is None:
@@ -1755,6 +2230,7 @@ class ExperimentApp(tk.Tk):
         self._map_tl_var.set(f"X={pos['x']:.2f}  Y={pos['y']:.2f}")
         self._log(f"[INFO ] Map corner TL recorded: X={pos['x']:.2f} Y={pos['y']:.2f} mm")
         self._update_map_size_display()
+        self._rebuild_map_calibration()
 
     def _update_map_size_display(self) -> None:
         if self._map_corner_br is None or self._map_corner_tl is None:
@@ -1763,6 +2239,41 @@ class ExperimentApp(tk.Tk):
         dx = abs(self._map_corner_br[0] - self._map_corner_tl[0])
         dy = abs(self._map_corner_br[1] - self._map_corner_tl[1])
         self._map_size_var.set(f"{dx:.1f} × {dy:.1f} mm")
+
+    def _rebuild_map_calibration(self) -> None:
+        """
+        Build (or clear) self._map_calibration from the recorded corners and the
+        lat/lon bounds entered in the Map Calibration UI.
+
+        Called automatically when corners are recorded or the bounds fields change.
+        Sets self._map_calibration = None if any required value is missing/invalid.
+        """
+        if not _GT_AVAILABLE:
+            return
+        if self._map_corner_br is None or self._map_corner_tl is None:
+            self._map_calibration = None
+            return
+        try:
+            lat_min = float(self._map_lat_min_var.get())
+            lat_max = float(self._map_lat_max_var.get())
+            lon_min = float(self._map_lon_min_var.get())
+            lon_max = float(self._map_lon_max_var.get())
+        except ValueError:
+            self._map_calibration = None
+            return
+        region = DemRegionBounds(
+            lat_min_deg=lat_min, lat_max_deg=lat_max,
+            lon_min_deg=lon_min, lon_max_deg=lon_max,
+        )
+        self._map_calibration = MapCalibration(
+            corner_br=self._map_corner_br,
+            corner_tl=self._map_corner_tl,
+            region=region,
+        )
+        self._log(
+            f"[INFO ] Map calibration ready: "
+            f"lat [{lat_min:.3f}, {lat_max:.3f}]  lon [{lon_min:.3f}, {lon_max:.3f}]"
+        )
 
     # ── Ground-track helpers ──────────────────────────────────────────────────
 
@@ -1848,14 +2359,28 @@ class ExperimentApp(tk.Tk):
                 n       = int(self._gt_n_var.get())
                 dur     = float(self._gt_duration_var.get())
                 cycles  = float(self._gt_cycles_var.get())
-                region  = self._get_dem_region_bounds()
+                # Prefer UI-entered bounds, then dem.region config, then warn+fallback
+                region = None
+                try:
+                    region = DemRegionBounds(
+                        lat_min_deg=float(self._map_lat_min_var.get()),
+                        lat_max_deg=float(self._map_lat_max_var.get()),
+                        lon_min_deg=float(self._map_lon_min_var.get()),
+                        lon_max_deg=float(self._map_lon_max_var.get()),
+                    )
+                except ValueError:
+                    region = self._get_dem_region_bounds()
                 if region is not None:
                     track = generate_synthetic_pass(region, duration_s=dur,
                                                     n_points=n, n_cycles=cycles)
                 else:
                     track = generate_synthetic_pass_normalized(n_points=n, duration_s=dur,
                                                                n_cycles=cycles)
-                    self._log("[WARN ] dem.region not configured — using normalised [0,1] coords.")
+                    self._log(
+                        "[WARN ] Map lat/lon bounds not set — "
+                        "synthetic pass uses normalised [0,1] coords. "
+                        "Enter bounds in Map Calibration before running live."
+                    )
             else:
                 path = self._gt_csv_path_var.get().strip()
                 if not path:
@@ -1891,23 +2416,34 @@ class ExperimentApp(tk.Tk):
     # ── Camera frame polling ──────────────────────────────────────────────────
 
     def _poll_cameras(self):
-        # RealSense D435
-        try:
-            item = self._rs_frame_q.get_nowait()
-            if isinstance(item[0], str):
-                self._log(f"[ERROR] RealSense worker: {item[1]}")
+        # RealSense D435 — poll directly on the main thread (no worker thread).
+        # wait_for_frames(timeout_ms=1) returns immediately if no frame is ready,
+        # avoiding all GIL / daemon-thread delivery issues on Windows.
+        if self._rs_pipeline is not None:
+            try:
+                frameset    = self._rs_pipeline.wait_for_frames(timeout_ms=1)
+                depth_frame = frameset.get_depth_frame()
+                color_frame = frameset.get_color_frame()
+                if depth_frame and color_frame:
+                    depth_colorized = np.asanyarray(
+                        self._rs_colorizer.colorize(depth_frame).get_data()
+                    ).copy()
+                    color_rgb = np.asanyarray(color_frame.get_data()).copy()
+                    depth_m   = np.asanyarray(
+                        depth_frame.get_data()
+                    ).astype(np.float32) / 1000.0
+                    depth_m[depth_m == 0] = np.nan
+                    self._last_depth_m   = depth_m
+                    self._last_grayscale = color_rgb
+                    self._last_depth_rgb = depth_colorized
+                    self._draw(self._depth_canvas, depth_colorized, RS_W, RS_H)
+                    self._draw(self._gray_canvas,  color_rgb,       RS_W, RS_H)
+                    self._maybe_capture_lidar_frame(color_rgb, depth_m)
+            except RuntimeError:
+                pass   # no frame ready within 1 ms — normal between frames
+            except Exception as e:
+                self._log(f"[ERROR] RealSense: {e}")
                 self._disconnect_rs()
-            else:
-                depth_colorized, color_rgb, depth_m = item
-                self._last_depth_m   = depth_m
-                self._last_grayscale = color_rgb
-                self._last_depth_rgb = depth_colorized
-                self._draw(self._depth_canvas, depth_colorized, RS_W, RS_H)
-                self._draw(self._gray_canvas,  color_rgb,       RS_W, RS_H)
-        except queue.Empty:
-            pass
-        except Exception as e:
-            self._log(f"[ERROR] Poll error: {e}")
 
         # ArduCam — read frame once, use it for display AND recording
         if self._arducam is not None:
@@ -1927,6 +2463,7 @@ class ExperimentApp(tk.Tk):
 
         self._poll_gantry()
         self._poll_orb()
+        self._poll_lidar_loc()
         self._after_id = self.after(POLL_MS, self._poll_cameras)
 
     def _draw(self, canvas: tk.Canvas, arr: np.ndarray, w: int, h: int):
@@ -1950,8 +2487,61 @@ class ExperimentApp(tk.Tk):
     # ── Snap & Visualize ──────────────────────────────────────────────────────
 
     def _snap_and_plot(self):
-        # (unchanged from original — omitted for brevity, keep your existing implementation)
-        self._log("[WARN ] _snap_and_plot: keep your existing implementation here.")
+        if self._last_depth_m is None:
+            self._log("[WARN ] Snap & Plot: no depth frame yet — connect RealSense first.")
+            return
+        if not _MPL_AVAILABLE:
+            self._log("[ERROR] Snap & Plot: matplotlib not installed.")
+            return
+        if not _PROJECTION_AVAILABLE:
+            self._log("[ERROR] Snap & Plot: realsense_projection module not available.")
+            return
+
+        try:
+            altitude_mm = float(self._snap_alt_var.get())
+        except ValueError:
+            altitude_mm = float(self._cfg.gantry.camera_altitude_mm or 200.0)
+
+        try:
+            model = RealSenseProjectionModel(self._cfg.realsense, altitude_mm)
+            patch, x_grid, y_grid = model.project_depth(self._last_depth_m, altitude_mm)
+        except Exception as e:
+            self._log(f"[ERROR] Snap & Plot: projection failed: {e}")
+            return
+
+        self._close_snap_window()
+        win = tk.Toplevel(self)
+        win.title("Snap & Plot 3D")
+        win.configure(bg="#1e1e2e")
+        win.protocol("WM_DELETE_WINDOW", self._close_snap_window)
+        self._snap_window = win
+
+        fig = Figure(figsize=(7, 5), dpi=100, facecolor="#1e1e2e")
+        ax  = fig.add_subplot(111, projection="3d", facecolor="#1e1e2e")
+
+        X, Y = np.meshgrid(x_grid, y_grid)
+        Z    = patch.copy()
+        Z[np.isnan(Z)] = np.nanmin(Z[np.isfinite(Z)]) if np.any(np.isfinite(Z)) else 0.0
+
+        ax.plot_surface(X, Y, Z, cmap=_mpl_cm.terrain,
+                        linewidth=0, antialiased=False, alpha=0.9)
+        ax.set_xlabel("X (mm)", color="#a6adc8", fontsize=8)
+        ax.set_ylabel("Y (mm)", color="#a6adc8", fontsize=8)
+        ax.set_zlabel("Elev (mm)", color="#a6adc8", fontsize=8)
+        ax.set_title(f"Elevation patch  —  alt={altitude_mm:.0f} mm",
+                     color="#cdd6f4", fontsize=9)
+        ax.tick_params(colors="#585b70", labelsize=7)
+
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        toolbar = NavigationToolbar2Tk(canvas, win)
+        toolbar.update()
+        toolbar.pack(fill=tk.X)
+
+        self._log(f"[OK   ] Snap & Plot: elevation patch {patch.shape[1]}×{patch.shape[0]} "
+                  f"cells, alt={altitude_mm:.0f} mm")
 
     def _close_snap_window(self):
         if self._snap_window is not None:
@@ -2025,9 +2615,6 @@ class ExperimentApp(tk.Tk):
 
         if self._orb_map_photo is not None:
             cnv.create_image(0, 0, anchor=tk.NW, image=self._orb_map_photo)
-        else:
-            self._orb_draw_placeholder()
-            return
 
         n = len(self._orb_history_map)
         for i, (px, py) in enumerate(self._orb_history_map):
@@ -2284,6 +2871,10 @@ class ExperimentApp(tk.Tk):
             self._track_runner.stop()
         if self._recording:
             self._stop_recording()
+        if self._lidar_recording:
+            self._stop_lidar_recording()
+        if self._lidar_loc_running:
+            self._stop_lidar_loc()
         self._stop_orb()
         self._disconnect_rs()
         self._disconnect_arducam()

@@ -154,6 +154,48 @@ class MapCalibration:
 
         return x_mm, y_mm
 
+    def to_lat_lon(self, x_mm: float, y_mm: float) -> Tuple[float, float]:
+        """
+        Convert a gantry (x_mm, y_mm) position to (lat_deg, lon_deg).
+
+        This is the inverse of to_mm().  The result is NOT clamped — positions
+        outside the calibrated map corners will return lat/lon values outside
+        the region bounds.
+
+        Returns (nan, nan) if the region spans zero degrees in either axis.
+        """
+        r = self.region
+
+        lat_span = r.lat_max_deg - r.lat_min_deg
+        lon_span = r.lon_max_deg - r.lon_min_deg
+        if lat_span == 0.0 or lon_span == 0.0:
+            import math
+            return math.nan, math.nan
+
+        map_x_span = self.corner_br[0] - self.corner_tl[0]
+        map_y_span = self.corner_br[1] - self.corner_tl[1]
+
+        scale_x = abs(map_x_span) / lat_span
+        scale_y = abs(map_y_span) / lon_span
+        scale   = min(scale_x, scale_y)
+
+        cx = (self.corner_tl[0] + self.corner_br[0]) / 2.0
+        cy = (self.corner_tl[1] + self.corner_br[1]) / 2.0
+
+        sign_x = 1.0 if map_x_span >= 0 else -1.0
+        sign_y = 1.0 if map_y_span >= 0 else -1.0
+
+        lat_offset_mm = (x_mm - cx) * sign_x
+        lon_offset_mm = (y_mm - cy) * sign_y
+
+        lat_frac = lat_offset_mm / (lat_span * scale) + 0.5
+        lon_frac = lon_offset_mm / (lon_span * scale) + 0.5
+
+        lat_deg = r.lat_max_deg - lat_frac * lat_span
+        lon_deg = r.lon_min_deg + lon_frac * lon_span
+
+        return lat_deg, lon_deg
+
     def map_size_mm(self) -> Tuple[float, float]:
         """Return (width_mm, height_mm) of the calibrated map area."""
         dx = abs(self.corner_br[0] - self.corner_tl[0])
