@@ -104,6 +104,14 @@ DEFAULT_RECORD_FPS   = 5       # frames per second saved during recording
 SESSIONS_ROOT        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions")
 DEFAULT_STL_PATH     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mars_output.stl")
 
+# ── Map coordinate constants ──────────────────────────────────────────────────
+# Top-left corner of the physical map = (lat=90°, lon=0°)
+# Bottom-right corner of the physical map = (lat=-90°, lon=360°)
+MAP_TL_LAT =  90.0
+MAP_TL_LON =   0.0
+MAP_BR_LAT = -90.0
+MAP_BR_LON = 360.0
+
 
 # ── Background worker: reads RealSense D435 frames off the main thread ────────
 class RealSenseWorker(threading.Thread):
@@ -267,8 +275,6 @@ class ExperimentApp(tk.Tk):
         self._arducam_focus_var     = tk.StringVar(value="500")
 
         # ── ArduCam FPS control ───────────────────────────────────────────────
-        # This controls how many frames per second are *saved* during recording.
-        # The GUI preview always refreshes at POLL_MS (20 Hz); this is independent.
         self._record_fps_var     = tk.IntVar(value=DEFAULT_RECORD_FPS)
         self._last_capture_time  = 0.0   # monotonic time of last saved frame
 
@@ -318,13 +324,13 @@ class ExperimentApp(tk.Tk):
         self._lidar_loc_status_var  = tk.StringVar(value="Idle")
 
         # ── ORB localization state ────────────────────────────────────────────
-        self._orb_running      = False          # True while the loop is active
-        self._orb_worker       = None           # current ORBWorker thread (or None)
-        self._orb_result_q     = queue.Queue()  # ORBWorker → main thread
-        self._orb_history_map  = []             # list of (map_px_x, map_px_y) estimated positions
-        self._orb_history_gantry = []           # list of (gantry_mm_x, gantry_mm_y) ground truth
+        self._orb_running      = False
+        self._orb_worker       = None
+        self._orb_result_q     = queue.Queue()
+        self._orb_history_map  = []             # list of (map_px_x, map_px_y)
+        self._orb_history_gantry = []           # list of (gantry_mm_x, gantry_mm_y)
         self._orb_ref_img_path = tk.StringVar(value="Experiments/mars_4k_color.jpg")
-        self._orb_map_photo    = None           # ImageTk reference for basemap
+        self._orb_map_photo    = None
         self._orb_est_lat_var  = tk.StringVar(value="—")
         self._orb_est_lon_var  = tk.StringVar(value="—")
         self._orb_est_gx_var   = tk.StringVar(value="—")
@@ -334,6 +340,16 @@ class ExperimentApp(tk.Tk):
         self._orb_status_var   = tk.StringVar(value="Idle")
         self._orb_frame_count  = 0
         self._orb_count_var    = tk.StringVar(value="0")
+
+        # ── ORB map video recording state ─────────────────────────────────────
+        self._orb_video_recording   = False          # toggle flag
+        self._orb_video_writer      = None           # cv2.VideoWriter or None
+        self._orb_video_path        = None           # path to current video file
+        self._orb_video_fps_var     = tk.IntVar(value=10)   # target FPS for video
+        self._orb_video_frame_count = 0
+        self._orb_video_count_var   = tk.StringVar(value="0")
+        self._orb_video_status_var  = tk.StringVar(value="Idle")
+        self._last_orb_video_time   = 0.0            # throttle video frame capture
 
         # Per-device status StringVars, populated in _build_status_bar
         self._status_color: dict[str, tk.StringVar] = {}
@@ -345,11 +361,48 @@ class ExperimentApp(tk.Tk):
         # Auto-load the terrain STL at startup (non-blocking — runs in background)
         if _TRN_AVAILABLE and os.path.isfile(DEFAULT_STL_PATH):
             self.after(100, lambda: self._load_stl_dem(DEFAULT_STL_PATH))
+    # ── Coordinate conversion helpers ─────────────────────────────────────────
+
+    def _gantry_mm_to_lat_lon(self, gx_mm: float, gy_mm: float):
+        """
+        Convert a gantry position (mm) to (lat_deg, lon_deg) using the same
+        axis mapping and coordinate convention as the live ORB pipeline:
+
+            _gantry_mm_to_canvas:   canvas-X ← gy_mm,  canvas-Y ← gx_mm
+            _ref_px_to_lon_lat:     lon = fx*360 - 180  (-180° to +180°)
+                                    lat = 90 - fy*180   (+90° to -90°)
+
+        Returns (lat_deg, lon_deg) or (nan, nan) if calibration is absent.
+        """
+        if self._map_corner_tl is None or self._map_corner_br is None:
+            return float("nan"), float("nan")
+
+        tl_x, tl_y = self._map_corner_tl
+        br_x, br_y = self._map_corner_br
+        span_x = br_x - tl_x
+        span_y = br_y - tl_y
+
+        if abs(span_x) < 1e-6 or abs(span_y) < 1e-6:
+            return float("nan"), float("nan")
+
+        # Mirror _gantry_mm_to_canvas exactly:
+        #   canvas X  ← gy_mm  (so gy drives longitude)
+        #   canvas Y  ← gx_mm  (so gx drives latitude)
+        fx = (gy_mm - tl_y) / span_y   # fraction across canvas X  →  longitude
+        fy = (gx_mm - tl_x) / span_x   # fraction across canvas Y  →  latitude
+
+        # Mirror _ref_px_to_lon_lat exactly:
+        #   lon = fx * 360 - 180   →  -180° to +180°
+        #   lat = 90 - fy * 180    →  +90° to -90°
+        lon_deg = fx * 360.0 - 180.0
+        lat_deg = 90.0 - fy * 180.0
+
+        return lat_deg, lon_deg
 
     # ── Top-level layout ──────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self.minsize(700, 400)          # never let the window get too small to use
+        self.minsize(700, 400)
         self._build_status_bar()
         ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X)
         self._build_notebook()
@@ -358,11 +411,6 @@ class ExperimentApp(tk.Tk):
     # ── Scrollable tab factory ────────────────────────────────────────────────
 
     def _make_scrollable_tab(self) -> tuple:
-        """
-        Returns (outer_tab, inner_frame).
-        Pack all section widgets into inner_frame — outer_tab goes into the notebook.
-        Mouse-wheel scrolling is wired up automatically.
-        """
         outer = tk.Frame(self._nb, bg="#1e1e2e")
         outer.rowconfigure(0, weight=1)
         outer.columnconfigure(0, weight=1)
@@ -400,7 +448,7 @@ class ExperimentApp(tk.Tk):
 
         return outer, inner
 
-    # ── Status bar (always visible) ───────────────────────────────────────────
+    # ── Status bar ───────────────────────────────────────────────────────────
 
     def _build_status_bar(self):
         bar = tk.Frame(self, bg="#11111b", padx=10, pady=6)
@@ -463,7 +511,6 @@ class ExperimentApp(tk.Tk):
     def _tab_run(self) -> tk.Frame:
         tab, tab_content = self._make_scrollable_tab()
 
-        # ── Map Calibration ───────────────────────────────────────────────
         cal_sec = self._section(tab_content, "Map Calibration")
         tk.Label(cal_sec,
                  text="Align ArduCam centre over the map corner, then click Record.",
@@ -521,12 +568,11 @@ class ExperimentApp(tk.Tk):
                            activebackground="#181825", font=("Consolas", 9)
                            ).pack(side=tk.LEFT, padx=(0, 16))
 
-        # Container that holds exactly one of the two sub-frames
         sub_container = tk.Frame(gt_sec, bg="#181825")
         sub_container.pack(anchor="w", padx=10, pady=(0, 2))
 
         self._gt_synth_frame = tk.Frame(sub_container, bg="#181825")
-        self._gt_synth_frame.pack(anchor="w")   # visible by default
+        self._gt_synth_frame.pack(anchor="w")
         for label, var, w in [("Duration (s):", self._gt_duration_var, 6),
                                ("N waypoints:", self._gt_n_var, 5),
                                ("Sine cycles:", self._gt_cycles_var, 4)]:
@@ -538,7 +584,6 @@ class ExperimentApp(tk.Tk):
                      ).pack(side=tk.LEFT, padx=(3, 14))
 
         self._gt_csv_frame = tk.Frame(sub_container, bg="#181825")
-        # hidden by default — shown when "Load CSV" is selected
         tk.Label(self._gt_csv_frame, text="File:", bg="#181825", fg="#a6adc8",
                  font=("Consolas", 9)).pack(side=tk.LEFT)
         tk.Entry(self._gt_csv_frame, textvariable=self._gt_csv_path_var, width=38,
@@ -559,7 +604,6 @@ class ExperimentApp(tk.Tk):
                  bg="#181825", fg="#585b70", font=("Consolas", 8)
                  ).pack(side=tk.LEFT, padx=(12, 0))
 
-        # ── Run Settings ──────────────────────────────────────────────────
         run_sec = self._section(tab_content, "Run Settings")
 
         settings_row = tk.Frame(run_sec, bg="#181825")
@@ -594,12 +638,11 @@ class ExperimentApp(tk.Tk):
 
         return tab
 
-    # ── LiDAR tab (RealSense D435) ────────────────────────────────────────────
+    # ── LiDAR tab ─────────────────────────────────────────────────────────────
 
     def _tab_lidar(self) -> tk.Frame:
         tab, tab_content = self._make_scrollable_tab()
 
-        # Connection
         conn = self._section(tab_content, "Connection")
 
         tk.Button(conn, text="Enumerate",  command=self._rs_enumerate,
@@ -616,7 +659,6 @@ class ExperimentApp(tk.Tk):
                  bg="#181825", fg="#cdd6f4",
                  font=("Consolas", 9)).grid(row=0, column=4, padx=(0, 8), pady=6)
 
-        # Settings
         settings = self._section(tab_content, "Settings")
 
         _r = self._cfg.realsense
@@ -730,7 +772,6 @@ class ExperimentApp(tk.Tk):
                                       highlightbackground="#313244")
         self._gray_canvas.grid(row=1, column=1, padx=6, pady=(0, 6))
 
-        # Snap & Visualize
         snap_sec = self._section(tab_content, "Snap & Visualize")
 
         tk.Label(snap_sec, text="Altitude (mm):", bg="#181825", fg="#a6adc8",
@@ -815,12 +856,10 @@ class ExperimentApp(tk.Tk):
     # ── ArduCam tab ───────────────────────────────────────────────────────────
 
     def _tab_arducam(self) -> tk.Frame:
-        # Outer frame that goes into the notebook
         tab = tk.Frame(self._nb, bg="#1e1e2e")
         tab.rowconfigure(0, weight=1)
         tab.columnconfigure(0, weight=1)
 
-        # Scrollable canvas + scrollbar — all content goes into `inner`
         _scroll_canvas = tk.Canvas(tab, bg="#1e1e2e", highlightthickness=0)
         _scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL,
                                    command=_scroll_canvas.yview)
@@ -829,12 +868,10 @@ class ExperimentApp(tk.Tk):
         _scroll_canvas.grid(row=0, column=0, sticky="nsew")
 
         inner = tk.Frame(_scroll_canvas, bg="#1e1e2e")
-        _inner_id = _scroll_canvas.create_window((0, 0), window=inner,
-                                                  anchor="nw")
+        _inner_id = _scroll_canvas.create_window((0, 0), window=inner, anchor="nw")
 
         def _on_inner_configure(event):
-            _scroll_canvas.configure(
-                scrollregion=_scroll_canvas.bbox("all"))
+            _scroll_canvas.configure(scrollregion=_scroll_canvas.bbox("all"))
 
         def _on_canvas_configure(event):
             _scroll_canvas.itemconfig(_inner_id, width=event.width)
@@ -848,8 +885,7 @@ class ExperimentApp(tk.Tk):
             elif event.num == 5:
                 _scroll_canvas.yview_scroll(1, "units")
             else:
-                _scroll_canvas.yview_scroll(
-                    int(-1 * (event.delta / 120)), "units")
+                _scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         _scroll_canvas.bind("<MouseWheel>", _on_mousewheel)
         _scroll_canvas.bind("<Button-4>",   _on_mousewheel)
@@ -878,7 +914,6 @@ class ExperimentApp(tk.Tk):
         # ── Recording section ─────────────────────────────────────────────
         rec_sec = self._section(tab_content, "Recording")
 
-        # Row 1: toggle button + status + frame counter
         rec_ctrl_row = tk.Frame(rec_sec, bg="#181825")
         rec_ctrl_row.pack(fill=tk.X, padx=10, pady=(8, 4))
 
@@ -906,7 +941,6 @@ class ExperimentApp(tk.Tk):
         tk.Label(rec_ctrl_row, text="frames", bg="#181825", fg="#585b70",
                  font=("Consolas", 8)).pack(side=tk.LEFT)
 
-        # Row 2: FPS slider + entry
         fps_row = tk.Frame(rec_sec, bg="#181825")
         fps_row.pack(fill=tk.X, padx=10, pady=(0, 4))
 
@@ -937,7 +971,6 @@ class ExperimentApp(tk.Tk):
                  bg="#181825", fg="#585b70",
                  font=("Consolas", 8, "italic")).pack(side=tk.LEFT)
 
-        # Row 3: session path readout
         path_row = tk.Frame(rec_sec, bg="#181825")
         path_row.pack(fill=tk.X, padx=10, pady=(0, 8))
 
@@ -1079,6 +1112,56 @@ class ExperimentApp(tk.Tk):
                      font=("Consolas", 8, "bold"), width=9, anchor="w"
                      ).pack(side=tk.LEFT, padx=(0, 10))
 
+        # ── ORB Map Video Recording controls ─────────────────────────────
+        vid_row = tk.Frame(orb_sec, bg="#181825")
+        vid_row.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        self._orb_vid_btn = tk.Button(
+            vid_row, text="⏺  Record Map Video",
+            command=self._toggle_orb_video,
+            bg="#1e6640", fg="#a6e3a1", activebackground="#2a7a50",
+            font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=10, pady=4, width=20)
+        self._orb_vid_btn.pack(side=tk.LEFT, padx=(0, 16))
+
+        tk.Label(vid_row, text="Video FPS:", bg="#181825", fg="#a6adc8",
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Scale(vid_row, from_=1, to=30, orient=tk.HORIZONTAL, length=120,
+                 variable=self._orb_video_fps_var,
+                 bg="#181825", fg="#cdd6f4", troughcolor="#313244",
+                 activebackground="#45475a", highlightthickness=0, relief=tk.FLAT,
+                 font=("Consolas", 8)
+                 ).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Entry(vid_row, textvariable=self._orb_video_fps_var, width=3,
+                 bg="#313244", fg="#cdd6f4", insertbackground="#cdd6f4",
+                 font=("Consolas", 9), relief=tk.FLAT
+                 ).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Label(vid_row, text="fps", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 16))
+
+        tk.Label(vid_row, text="Status:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        self._orb_vid_status_lbl = tk.Label(
+            vid_row, textvariable=self._orb_video_status_var,
+            bg="#181825", fg="#585b70",
+            font=("Consolas", 8, "bold"), width=10, anchor="w")
+        self._orb_vid_status_lbl.pack(side=tk.LEFT, padx=(3, 12))
+
+        tk.Label(vid_row, text="Frames:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        tk.Label(vid_row, textvariable=self._orb_video_count_var,
+                 bg="#181825", fg="#cdd6f4",
+                 font=("Consolas", 8), width=6, anchor="w"
+                 ).pack(side=tk.LEFT, padx=(3, 0))
+
+        vid_info = tk.Frame(orb_sec, bg="#181825")
+        vid_info.pack(fill=tk.X, padx=10, pady=(0, 4))
+        tk.Label(vid_info,
+                 text="Video is saved to session_dir/orb_map_<timestamp>.mp4  "
+                      "(ORB does not need to be running to record)",
+                 bg="#181825", fg="#585b70",
+                 font=("Consolas", 8, "italic")).pack(anchor="w")
+
+        # ── Map canvas ────────────────────────────────────────────────────
         map_frame = tk.Frame(orb_sec, bg="#181825")
         map_frame.pack(padx=10, pady=(0, 10))
 
@@ -1098,7 +1181,6 @@ class ExperimentApp(tk.Tk):
     def _tab_gantry(self) -> tk.Frame:
         tab, tab_content = self._make_scrollable_tab()
 
-        # ── Connection ────────────────────────────────────────────────────
         conn = self._section(tab_content, "Connection")
 
         tk.Label(conn, text="Port:", bg="#181825", fg="#a6adc8",
@@ -1124,7 +1206,6 @@ class ExperimentApp(tk.Tk):
         tk.Button(conn, text="Disconnect", command=self._disconnect_gantry,
                   **self._btn(fg="#f38ba8")).grid(row=0, column=5, padx=(4, 8))
 
-        # ── Position ──────────────────────────────────────────────────────
         pos = self._section(tab_content, "Position")
 
         tk.Label(pos, text="State:", bg="#181825", fg="#a6adc8",
@@ -1148,7 +1229,6 @@ class ExperimentApp(tk.Tk):
                      font=("Consolas", 9, "bold"), width=10, anchor="e"
                      ).grid(row=0, column=c + 1, padx=(0, 4))
 
-        # ── Jog controls ──────────────────────────────────────────────────
         jog = self._section(tab_content, "Jog")
 
         step_row = tk.Frame(jog, bg="#181825")
@@ -1211,7 +1291,6 @@ class ExperimentApp(tk.Tk):
                  font=("Consolas", 8, "italic")
                  ).pack(padx=10, pady=(0, 6), anchor="w")
 
-        # ── Go To ─────────────────────────────────────────────────────────
         goto_sec = self._section(tab_content, "Go To")
 
         coord_row = tk.Frame(goto_sec, bg="#181825")
@@ -1253,7 +1332,6 @@ class ExperimentApp(tk.Tk):
         tk.Label(feed_row, text=" mm/min", bg="#181825", fg="#585b70",
                  font=("Consolas", 8)).pack(side=tk.LEFT)
 
-        # ── Machine ───────────────────────────────────────────────────────
         mach = self._section(tab_content, "Machine")
         mach_row = tk.Frame(mach, bg="#181825")
         mach_row.pack(padx=8, pady=(6, 2), anchor="w")
@@ -1295,12 +1373,11 @@ class ExperimentApp(tk.Tk):
 
         return tab
 
-    # ── Log (below notebook, always visible) ─────────────────────────────────
+    # ── Log (below notebook) ──────────────────────────────────────────────────
 
     def _build_log(self):
         self._log_visible = True
 
-        # ── Header row: label + toggle button ────────────────────────────
         header = tk.Frame(self, bg="#11111b")
         header.pack(fill=tk.X, padx=8, pady=(2, 0))
 
@@ -1318,7 +1395,6 @@ class ExperimentApp(tk.Tk):
 
         ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8)
 
-        # ── Log text widget (collapsible) ─────────────────────────────────
         self._log_frame = tk.Frame(self, bg="#11111b")
         self._log_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
 
@@ -1374,12 +1450,10 @@ class ExperimentApp(tk.Tk):
             self._start_recording()
 
     def _start_recording(self) -> None:
-        """Create session folder, open CSVs, flip recording flag."""
         if self._arducam is None:
             self._log("[WARN ] Recording: ArduCam not connected.")
             return
 
-        # Build session directory: ./sessions/YYYYMMDD_HHMMSS/
         session_name = time.strftime("%Y%m%d_%H%M%S")
         self._session_dir = os.path.join(SESSIONS_ROOT, session_name)
         self._frames_dir  = os.path.join(self._session_dir, "frames")
@@ -1390,15 +1464,18 @@ class ExperimentApp(tk.Tk):
         try:
             self._session_csv_file   = open(self._session_csv_path, "w", newline="")
             self._session_csv_writer = csv.writer(self._session_csv_file)
+            # ── NEW: added lat_deg and lon_deg columns ────────────────────
             self._session_csv_writer.writerow(
-                ["timestamp_s", "filepath", "lat_deg", "lon_deg"])
+                ["timestamp_s", "filepath",
+                 "x_mm", "y_mm", "z_mm",
+                 "lat_deg", "lon_deg"])
         except OSError as e:
             self._log(f"[ERROR] Could not open CSV files: {e}")
             return
 
         self._recording          = True
         self._record_frame_count = 0
-        self._last_capture_time  = 0.0   # force immediate first capture
+        self._last_capture_time  = 0.0
         self._record_count_var.set("0")
         self._record_status_var.set("● Recording")
         self._rec_status_lbl.configure(fg="#f38ba8")
@@ -1407,10 +1484,12 @@ class ExperimentApp(tk.Tk):
             text="■  Stop Recording",
             bg="#6e2020", fg="#f38ba8", activebackground="#7e3030")
 
+        if self._map_corner_tl is None or self._map_corner_br is None:
+            self._log("[WARN ] Recording: map not calibrated — lat/lon columns will be NaN.")
+
         self._log(f"[OK   ] Recording started → {self._session_dir}")
 
     def _stop_recording(self) -> None:
-        """Flush and close CSVs, flip recording flag."""
         self._recording = False
 
         for fh in (self._session_csv_file,):
@@ -1437,8 +1516,11 @@ class ExperimentApp(tk.Tk):
     def _maybe_capture_frame(self, frame_bgr: np.ndarray) -> None:
         """
         Called every GUI poll with the latest ArduCam frame (BGR).
-        Saves a JPEG and writes one row to each CSV if enough time has elapsed
-        since the last capture (based on the target FPS).
+        Saves a JPEG and writes one row to session.csv, throttled to target FPS.
+
+        CSV columns: timestamp_s, filepath, x_mm, y_mm, z_mm, lat_deg, lon_deg
+        lat/lon are derived from the current gantry position using the calibrated
+        map corners (TL = 90°lat/0°lon, BR = -90°lat/360°lon).
         """
         if not self._recording:
             return
@@ -1446,12 +1528,11 @@ class ExperimentApp(tk.Tk):
         now = time.monotonic()
         target_interval = 1.0 / max(self._record_fps_var.get(), 1)
         if (now - self._last_capture_time) < target_interval:
-            return   # not time yet
+            return
 
         self._last_capture_time = now
-        wall_ts = time.time()   # Unix timestamp for CSV
+        wall_ts = time.time()
 
-        # ── Save JPEG ────────────────────────────────────────────────────
         fname    = f"{wall_ts:.6f}.jpg"
         rel_path = os.path.join("frames", fname)
         abs_path = os.path.join(self._frames_dir, fname)
@@ -1461,22 +1542,27 @@ class ExperimentApp(tk.Tk):
             self._log(f"[ERROR] Frame save failed: {e}")
             return
 
-        # ── Write single combined CSV row ────────────────────────────────
-        lat = lon = float("nan")
-        if self._gantry_worker is not None and self._map_calibration is not None:
+        # ── Gantry position ───────────────────────────────────────────────
+        gx = gy = gz = float("nan")
+        if self._gantry_worker is not None:
             try:
                 pos, _ = self._gantry_worker.get_position()
                 lat, lon = self._map_calibration.to_lat_lon(pos["x"], pos["y"])
             except Exception:
                 pass
+
+        # ── Lat/lon from gantry position ──────────────────────────────────
+        lat_deg, lon_deg = self._gantry_mm_to_lat_lon(gx, gy)
+
         try:
-            self._session_csv_writer.writerow(
-                [f"{wall_ts:.6f}", rel_path,
-                 f"{lat:.6f}", f"{lon:.6f}"])
+            self._session_csv_writer.writerow([
+                f"{wall_ts:.6f}", rel_path,
+                f"{gx:.4f}", f"{gy:.4f}", f"{gz:.4f}",
+                f"{lat_deg:.6f}", f"{lon_deg:.6f}",
+            ])
         except Exception as e:
             self._log(f"[ERROR] session.csv write failed: {e}")
 
-        # ── Update counter ───────────────────────────────────────────────
         self._record_frame_count += 1
         self._record_count_var.set(str(self._record_frame_count))
 
@@ -1856,7 +1942,6 @@ class ExperimentApp(tk.Tk):
     # ── FPS control ───────────────────────────────────────────────────────────
 
     def _on_fps_slider(self, value) -> None:
-        """Slider callback — clamp to [1, 30] and sync the IntVar."""
         try:
             clamped = max(1, min(30, int(float(value))))
             self._record_fps_var.set(clamped)
@@ -1869,6 +1954,177 @@ class ExperimentApp(tk.Tk):
             self._lidar_record_fps_var.set(clamped)
         except (ValueError, TypeError):
             pass
+    # ── ORB map video recording ───────────────────────────────────────────────
+
+    def _toggle_orb_video(self) -> None:
+        if self._orb_video_recording:
+            self._stop_orb_video()
+        else:
+            self._start_orb_video()
+
+    def _start_orb_video(self) -> None:
+        """
+        Open a cv2.VideoWriter that will capture the ORB map canvas each time
+        _orb_redraw_map() is called (throttled to the selected video FPS).
+
+        The output file is placed in the current session directory if a
+        recording session is active, otherwise in SESSIONS_ROOT directly.
+        """
+        if not _CV2_AVAILABLE:
+            self._log("[ERROR] ORB video: OpenCV not available.")
+            return
+
+        # Choose output directory
+        out_dir = self._session_dir if self._session_dir else SESSIONS_ROOT
+        os.makedirs(out_dir, exist_ok=True)
+
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        self._orb_video_path = os.path.join(out_dir, f"orb_map_{ts}.mp4")
+
+        fps = max(1, min(30, self._orb_video_fps_var.get()))
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+        self._orb_video_writer = cv2.VideoWriter(
+            self._orb_video_path, fourcc, fps,
+            (ORB_MAP_W, ORB_MAP_H))
+
+        if not self._orb_video_writer.isOpened():
+            self._log(f"[ERROR] ORB video: could not open VideoWriter for '{self._orb_video_path}'")
+            self._orb_video_writer = None
+            return
+
+        self._orb_video_recording   = True
+        self._orb_video_frame_count = 0
+        self._last_orb_video_time   = 0.0   # force first frame immediately
+        self._orb_video_count_var.set("0")
+        self._orb_video_status_var.set("● Recording")
+        self._orb_vid_status_lbl.configure(fg="#f38ba8")
+        self._orb_vid_btn.configure(
+            text="■  Stop Map Video",
+            bg="#6e2020", fg="#f38ba8", activebackground="#7e3030")
+
+        self._log(f"[OK   ] ORB map video recording started → {self._orb_video_path}")
+
+    def _stop_orb_video(self) -> None:
+        self._orb_video_recording = False
+        if self._orb_video_writer is not None:
+            self._orb_video_writer.release()
+            self._orb_video_writer = None
+
+        self._orb_video_status_var.set("Idle")
+        self._orb_vid_status_lbl.configure(fg="#585b70")
+        self._orb_vid_btn.configure(
+            text="⏺  Record Map Video",
+            bg="#1e6640", fg="#a6e3a1", activebackground="#2a7a50")
+
+        self._log(
+            f"[OK   ] ORB map video stopped — "
+            f"{self._orb_video_frame_count} frames → {self._orb_video_path}"
+        )
+
+    def _render_orb_map_to_array(self) -> np.ndarray:
+        """
+        Re-render the ORB map directly into a (ORB_MAP_H × ORB_MAP_W × 3) uint8
+        numpy array (RGB).  Mirrors exactly what _orb_redraw_map() draws onto the
+        Tk canvas, but works entirely in PIL/numpy — no screen capture needed.
+        """
+        # ── Background / basemap ─────────────────────────────────────────
+        if self._orb_map_photo is not None and hasattr(self, "_orb_ref_img_bgr"):
+            # Use the cached resized basemap we stored when loading
+            base = self._orb_basemap_pil.copy()
+        else:
+            # Plain dark background
+            base = Image.new("RGB", (ORB_MAP_W, ORB_MAP_H), color=(13, 13, 26))
+
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(base)
+
+        n = len(self._orb_history_map)
+
+        # ── Estimated-position trail (blue) ──────────────────────────────
+        for i, (px, py) in enumerate(self._orb_history_map):
+            alpha_frac = (i + 1) / max(n, 1)
+            r = int(30  + alpha_frac * 80)
+            g = int(40  + alpha_frac * 140)
+            b = int(120 + alpha_frac * 135)
+            r_dot = max(2, int(3 * alpha_frac))
+            draw.ellipse([px - r_dot, py - r_dot, px + r_dot, py + r_dot],
+                         fill=(r, g, b))
+
+        if len(self._orb_history_map) >= 2:
+            flat = [coord for pt in self._orb_history_map for coord in pt]
+            pts  = list(zip(flat[0::2], flat[1::2]))
+            draw.line(pts, fill=(68, 136, 204), width=1)
+
+        # ── Ground-truth trail (green) ────────────────────────────────────
+        n_gt = len(self._orb_history_gantry)
+        gt_canvas_pts = []
+        for i, (gx_mm, gy_mm) in enumerate(self._orb_history_gantry):
+            px, py = self._gantry_mm_to_canvas(gx_mm, gy_mm)
+            if px is None:
+                continue
+            alpha_frac = (i + 1) / max(n_gt, 1)
+            r_dot  = max(2, int(3 * alpha_frac))
+            shade  = int(80 + alpha_frac * 175)
+            draw.ellipse([px - r_dot, py - r_dot, px + r_dot, py + r_dot],
+                         fill=(0, shade, 0))
+            gt_canvas_pts.append((px, py))
+
+        if len(gt_canvas_pts) >= 2:
+            draw.line(gt_canvas_pts, fill=(68, 204, 68), width=1)
+
+        # ── Current estimated position marker (cyan cross + circle) ──────
+        if self._orb_history_map:
+            cx, cy = self._orb_history_map[-1]
+            R = 6
+            draw.ellipse([cx - R, cy - R, cx + R, cy + R],
+                         outline=(255, 255, 255), fill=(0, 212, 255), width=1)
+            # cross arms (extend R px beyond the circle edge)
+            draw.line([(cx - R*2, cy), (cx - R, cy)], fill=(0, 212, 255), width=1)
+            draw.line([(cx + R,   cy), (cx + R*2, cy)], fill=(0, 212, 255), width=1)
+            draw.line([(cx, cy - R*2), (cx, cy - R)], fill=(0, 212, 255), width=1)
+            draw.line([(cx, cy + R),   (cx, cy + R*2)], fill=(0, 212, 255), width=1)
+            draw.text((cx + R + 4, cy - R - 4), "EST", fill=(0, 212, 255))
+
+        # ── Current ground-truth marker (green circle) ────────────────────
+        if self._orb_history_gantry:
+            gx_mm, gy_mm = self._orb_history_gantry[-1]
+            px, py = self._gantry_mm_to_canvas(gx_mm, gy_mm)
+            if px is not None:
+                R = 6
+                draw.ellipse([px - R, py - R, px + R, py + R],
+                             outline=(255, 255, 255), fill=(0, 255, 136), width=1)
+                draw.text((px + R + 4, py - R - 4), "GT", fill=(0, 255, 136))
+
+        return np.array(base)   # RGB uint8
+
+    def _maybe_capture_orb_video_frame(self) -> None:
+        """
+        Render the ORB map to a numpy array and write it to the VideoWriter,
+        throttled to the chosen video FPS.
+        Called from _orb_redraw_map() every time the map is redrawn.
+        No screen capture — pixels come straight from the same data the canvas uses.
+        """
+        if not self._orb_video_recording or self._orb_video_writer is None:
+            return
+
+        now = time.monotonic()
+        fps = max(1, min(30, self._orb_video_fps_var.get()))
+        if (now - self._last_orb_video_time) < (1.0 / fps):
+            return
+
+        self._last_orb_video_time = now
+
+        try:
+            frame_rgb = self._render_orb_map_to_array()          # RGB
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            self._log(f"[WARN ] ORB video render failed: {e}")
+            return
+
+        self._orb_video_writer.write(frame_bgr)
+        self._orb_video_frame_count += 1
+        self._orb_video_count_var.set(str(self._orb_video_frame_count))
 
     # ── RealSense D435 connection ─────────────────────────────────────────────
 
@@ -2022,6 +2278,8 @@ class ExperimentApp(tk.Tk):
             self._stop_recording()
         if self._orb_running:
             self._stop_orb()
+        if self._orb_video_recording:
+            self._stop_orb_video()
         if self._arducam:
             self._arducam.release()
             self._arducam = None
@@ -2048,8 +2306,7 @@ class ExperimentApp(tk.Tk):
             if supported:
                 self._log(f"[OK   ] Autofocus set {state_str}.")
             else:
-                self._log(f"[WARN ] Camera did not accept autofocus={state_str} "
-                          f"(may not be supported by this device/driver).")
+                self._log(f"[WARN ] Camera did not accept autofocus={state_str}.")
         else:
             self._log("[WARN ] Camera not connected — setting will apply on next connect.")
 
@@ -2090,8 +2347,7 @@ class ExperimentApp(tk.Tk):
         if supported:
             self._log(f"[OK   ] Focus set to {focus_val} (camera reports {int(actual)}).")
         else:
-            self._log(f"[WARN ] Camera did not accept focus={focus_val} "
-                      f"(may not be supported by this device/driver).")
+            self._log(f"[WARN ] Camera did not accept focus={focus_val}.")
 
     # ── Gantry connection ─────────────────────────────────────────────────────
 
@@ -2487,9 +2743,6 @@ class ExperimentApp(tk.Tk):
         if path:
             self._gt_csv_path_var.set(path)
 
-    # ── Column-name aliases accepted for lat/lon in ground-track CSVs ────────
-    # Keys are the canonical names _load_gt_csv expects; values are the
-    # alternate spellings we'll remap to the canonical form.
     _GT_COL_ALIASES: dict = {
         "lat_deg": ["lat", "latitude", "lat_degrees", "Lat", "Latitude",
                     "LAT", "LATITUDE", "lat_deg"],
@@ -2500,38 +2753,30 @@ class ExperimentApp(tk.Tk):
     }
 
     def _normalise_gt_csv(self, src_path: str) -> str:
-        """
-        Read *src_path*, remap any known column-name variants to the canonical
-        names expected by load_csv(), and write a temporary file next to the
-        original.  Returns the path to the normalised file, or *src_path*
-        unchanged if no remapping was needed.
-        """
         import tempfile
 
         with open(src_path, newline="") as fh:
             reader = csv.DictReader(fh)
             if reader.fieldnames is None:
-                return src_path  # empty file — let load_csv handle the error
+                return src_path
             original_cols = list(reader.fieldnames)
             rows = list(reader)
 
-        # Build a remap dict:  original_col_name → canonical_col_name
         remap: dict[str, str] = {}
         for canonical, aliases in self._GT_COL_ALIASES.items():
             for col in original_cols:
                 if col == canonical:
-                    break                      # already correct
+                    break
                 if col in aliases:
                     remap[col] = canonical
                     break
 
         if not remap:
             self._log(f"[INFO ] CSV columns look correct: {original_cols}")
-            return src_path  # nothing to do
+            return src_path
 
         self._log(f"[INFO ] CSV column remap: {remap}")
 
-        # Write normalised CSV to a temp file
         new_cols = [remap.get(c, c) for c in original_cols]
         tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".csv", delete=False, newline="")
@@ -2579,8 +2824,6 @@ class ExperimentApp(tk.Tk):
                 if not path:
                     self._log("[ERROR] No CSV path specified.")
                     return
-
-                # load_csv handles BOM, tab vs comma, and empty ghost columns
                 track = _load_gt_csv(path)
                 self._log(f"[INFO ] CSV loaded from: {path}")
 
@@ -2591,9 +2834,6 @@ class ExperimentApp(tk.Tk):
                       f"path length {path_len:.4f}°")
         except Exception as exc:
             self._log(f"[ERROR] Ground track: {exc}")
-            self._log("[INFO ] Tip: CSV must have lat/lon columns. Accepted names:")
-            self._log("[INFO ]   lat → lat_deg, lon_deg, latitude, longitude, lng …")
-            self._log("[INFO ]   Upload your CSV and check the column names match.")
 
     def _get_dem_region_bounds(self):
         r = self._cfg.dem.region
@@ -2639,18 +2879,15 @@ class ExperimentApp(tk.Tk):
                 self._log(f"[ERROR] RealSense: {e}")
                 self._disconnect_rs()
 
-        # ArduCam — read frame once, use it for display AND recording
+        # ArduCam
         if self._arducam is not None:
             ret, frame_bgr = self._arducam.read()
             if ret:
-                # Display (always at GUI refresh rate)
                 self._draw(self._arducam_canvas,
                            cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB),
                            ARDUCAM_W, ARDUCAM_H)
                 self._draw_crosshair(self._arducam_canvas, ARDUCAM_W, ARDUCAM_H)
-                # Recording (throttled to target FPS)
                 self._maybe_capture_frame(frame_bgr)
-            # Keep focus readout current
             focus_now = self._arducam.get(cv2.CAP_PROP_FOCUS)
             if focus_now >= 0:
                 self._focus_readout_var.set(str(int(focus_now)))
@@ -2780,11 +3017,13 @@ class ExperimentApp(tk.Tk):
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(img_rgb).resize(
                 (ORB_MAP_W, ORB_MAP_H), Image.LANCZOS)
-            self._orb_map_photo = ImageTk.PhotoImage(pil_img)
+            self._orb_map_photo   = ImageTk.PhotoImage(pil_img)
+            self._orb_basemap_pil = pil_img          # kept as PIL for video rendering
+            self._orb_ref_img_bgr = True             # sentinel: basemap is loaded
             h, w = img_bgr.shape[:2]
             self._orb_ref_w = w
             self._orb_ref_h = h
-            self._log(f"[OK   ] Basemap loaded: {w}×{h} px")
+            self._log(f"[OK   ] Basemap loaded: {w}\u00d7{h} px")
             return True
         except Exception as e:
             self._log(f"[ERROR] Basemap load exception: {e}")
@@ -2804,6 +3043,7 @@ class ExperimentApp(tk.Tk):
                         fill="#313244", font=("Consolas", 9), anchor="center")
 
     def _orb_redraw_map(self) -> None:
+        """Redraw the ORB map canvas, then optionally capture a video frame."""
         cnv = self._orb_map_canvas
         cnv.delete("all")
 
@@ -2873,6 +3113,12 @@ class ExperimentApp(tk.Tk):
                                 text="GT", fill="#00ff88",
                                 font=("Consolas", 7, "bold"), anchor="w",
                                 tags="orb_gt_dot")
+
+        # ── Capture video frame if recording ─────────────────────────────
+        # We call update_idletasks so the canvas has finished drawing before
+        # we try to grab its pixels.
+        self._orb_map_canvas.update_idletasks()
+        self._maybe_capture_orb_video_frame()
 
     def _ref_px_to_canvas(self, ref_px_x: float, ref_px_y: float):
         if not hasattr(self, "_orb_ref_w") or self._orb_ref_w == 0:
@@ -3069,6 +3315,8 @@ class ExperimentApp(tk.Tk):
             self._stop_lidar_recording()
         self._close_trn_window()
         self._close_snap_window()
+        if self._orb_video_recording:
+            self._stop_orb_video()
         self._stop_orb()
         self._disconnect_rs()
         self._disconnect_arducam()
