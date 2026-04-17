@@ -16,7 +16,7 @@ import pandas as pd
 def ORB():
     root = os.getcwd()
     img1Path = os.path.join(root, "WholeTang.tif") #query image
-    img2Path = os.path.join(root, "mars_12k_color.jpg") #training image
+    img2Path = os.path.join(root, "mars_4k_color.jpg") #training image
     #download image here https://planetpixelemporium.com/mars5672.html#
     #crop it for the query
     # Seems to work best when the resolution of both images are the same, so we need to use 4k i think to match arducam
@@ -239,40 +239,212 @@ def simulatedExperiment():
 
 
 
-def postProcess(folderFilePath, BLx, BLy, TRx, TRy, numfeatures=50000):
-    csvpath = folderFilePath+"\session.csv"
+
+
+def postProcess(folderFilePath, BLx, BLy, TRx, TRy, numfeatures=50000,
+                output_csv_name="session_with_estimates.csv",
+                overwrite_original=False):
+    """
+    Processes each image in session.csv, estimates pixel position, converts to lat/lon,
+    and either:
+      - appends results to the original CSV, or
+      - saves to a new CSV.
+
+    Assumptions:
+      - img2 spans the full globe:
+            x = 0           -> lon = -180
+            x = width / 2   -> lon = 0
+            x = width       -> lon = 180
+
+            y = 0           -> lat = 90   (top)
+            y = height / 2  -> lat = 0
+            y = height      -> lat = -90  (bottom)
+      - getPosePixelCords() returns (x_pixel, y_pixel) in img2 pixel coordinates.
+    """
+
+    csvpath = os.path.join(folderFilePath, "session.csv")
     df = pd.read_csv(csvpath)
-    #print(df.head())
-    centerlist=[]
-    for row in df.iterrows():
-        img1filepath = folderFilePath  +"\\"+ str.strip(row['filepath'])
-        print(img1filepath)
+
+    # Load global reference image
+    img2_path = r".\Experiments\mars_4k_color.jpg"
+    img2 = cv.imread(img2_path, cv.IMREAD_COLOR)
+
+    if img2 is None:
+        raise FileNotFoundError(f"Could not load reference image: {img2_path}")
+
+    img2 = cv.cvtColor(img2, cv.COLOR_BGR2RGB)
+
+    img_height, img_width = img2.shape[:2]
+
+    estimatedx = []
+    estimatedy = []
+    estimated_lat = []
+    estimated_lon = []
+
+    for _, row in df.iterrows():
+
+        # Load image from filepath in CSV
+        img1filepath = os.path.join(folderFilePath, str(row["filepath"]).strip())
+        print(f"Processing: {img1filepath}")
+
         img1 = cv.imread(img1filepath, cv.IMREAD_GRAYSCALE)
 
-        (center, refRes) = getPosePixelCords(img1, numfeatures)
-        centerlist.append(center)
-    plt.figure()
+        if img1 is None:
+            print(f"Warning: Could not load {img1filepath}")
+            estimatedx.append(None)
+            estimatedy.append(None)
+            estimated_lat.append(None)
+            estimated_lon.append(None)
+            continue
 
-    estimatedx = [row[0] for row in centerlist]
-    estimatedy = [row[1] for row in centerlist]
-    plt.plot(estimatedx,estimatedy, color='green')
-    img2 = cv.imread(".\Experiments\mars_4k_color.jpg", cv.IMREAD_COLOR)
-    img2 = cv.cvtColor(img2, cv.COLOR_BGR2RGB)
-    plt.imshow(img2)
+        # Get estimated center pixel coordinates
+        center, refRes = getPosePixelCords(img1, numfeatures)
+        x_pix, y_pix = center
 
-    gantryx = df['x_mm']
+        estimatedx.append(x_pix)
+        estimatedy.append(y_pix)
 
+        # ---- Convert pixel coordinates to longitude ----
+        # x = 0      -> -180
+        # x = width  -> +180
+        lon = (x_pix / img_width) * 360.0 - 180.0
 
+        # ---- Convert pixel coordinates to latitude ----
+        # y = 0       -> +90
+        # y = height  -> -90
+        lat = 90.0 - (y_pix / img_height) * 180.0
 
+        estimated_lat.append(lat)
+        estimated_lon.append(lon)
 
+    # Add timestamped estimates to dataframe
+    # Uses existing timestamp column if available, otherwise index
+    if "timestamp" not in df.columns:
+        df["timestamp"] = df.index
 
-    
+    df["estimated_x_pixels"] = estimatedx
+    df["estimated_y_pixels"] = estimatedy
+    df["estimated_latitude_deg"] = estimated_lat
+    df["estimated_longitude_deg"] = estimated_lon
+
+    # Save CSV
+    if overwrite_original:
+        save_path = csvpath
+    else:
+        save_path = os.path.join(folderFilePath, output_csv_name)
+
+    df.to_csv(save_path, index=False)
+    print(f"Saved estimated positions to: {save_path}")
+
+    # Plot estimated path over reference image
+    # plt.figure(figsize=(12, 6))
+    # plt.imshow(img2)
+    # plt.plot(estimatedx, estimatedy, color='green', linewidth=1.5)
+    # #plt.scatter(estimatedx, estimatedy, color='red', s=10)
+    # plt.title("Estimated Pixel Positions")
+    # plt.xlabel("X Pixel")
+    # plt.ylabel("Y Pixel")
+    # plt.show()
+
+        # =========================
+    # Plot on Mars map in LAT/LON space
+    # =========================
+
+    plt.figure(figsize=(14, 7))
+
+    # IMPORTANT:
+    # Set extent so image axes are longitude/latitude instead of pixels
+    # extent = [xmin, xmax, ymin, ymax]
+    plt.imshow(
+        img2,
+        extent=[-180, 180, -90, 90],
+        origin='upper',   # top of image = +90 latitude
+        aspect='auto'
+    )
+
+    # -------------------------
+    # Plot gantry truth from CSV
+    # -------------------------
+    if "lon_deg" in df.columns and "lat_deg" in df.columns:
+        gantry_lon = df["lon_deg"].astype(float).copy()
+
+        # Convert 0–360 longitude into -180 to 180 for consistent plotting
+        gantry_lon = gantry_lon.apply(lambda x: x - 360 if x > 180 else x)
+
+        gantry_lat = df["lat_deg"].astype(float)
+
+        plt.plot(
+            gantry_lon,
+            gantry_lat,
+            color='green',
+            linewidth=2,
+            label='Gantry Truth'
+        )
+
+        plt.scatter(
+            gantry_lon,
+            gantry_lat,
+            color='green',
+            s=5
+        )
+
+    # -------------------------
+    # Plot estimated trajectory
+    # -------------------------
+    plt.plot(
+        estimated_lon,
+        estimated_lat,
+        color='purple',
+        linewidth=2,
+        label='Estimated Pose'
+    )
+
+    plt.scatter(
+        estimated_lon,
+        estimated_lat,
+        color='purple',
+        s=5
+    )
+
+    # -------------------------
+    # Plot formatting
+    # -------------------------
+    plt.xlabel("Longitude (deg)")
+    plt.ylabel("Latitude (deg)")
+    plt.title("Mars Map: Gantry Truth vs Estimated Pose")
+    plt.xlim([-180, 180])
+    plt.ylim([-90, 90])
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+# def postProcess(folderFilePath, BLx, BLy, TRx, TRy, numfeatures=50000):
+#     csvpath = folderFilePath+"session.csv"
+#     df = pd.read_csv(csvpath)
+#     #print(df.head())
+#     centerlist=[]
+#     for row in df.iterrows():
+#         img1filepath = folderFilePath  + str.strip(row['filepath'])
+#         print(img1filepath)
+#         img1 = cv.imread(img1filepath, cv.IMREAD_GRAYSCALE)
+
+#         (center, refRes) = getPosePixelCords(img1, numfeatures)
+#         centerlist.append(center)
+#     plt.figure()
+
+#     estimatedx = [row[0] for row in centerlist]
+#     estimatedy = [row[1] for row in centerlist]
+#     plt.plot(estimatedx,estimatedy, color='green')
+#     img2 = cv.imread(".\Experiments\mars_4k_color.jpg", cv.IMREAD_COLOR)
+#     img2 = cv.cvtColor(img2, cv.COLOR_BGR2RGB)
+#     plt.imshow(img2)
     
 
 if __name__ == '__main__':
-    ORB()
+    #ORB()
     #print(getPosePixelCords("mars_cropped_4k_1.jpg"))
     #simulatedExperiment()
-    #postProcess(r".\sessions\20260406_215542", -378, -788, 23, -3)
+    postProcess(r"sessions\20260415_113758", -378, -788, 23, -3)
 
     
