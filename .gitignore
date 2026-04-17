@@ -14,3 +14,4 @@ __pycache__/
 *.csv
 *.env
 results/*
+mars_output.stl

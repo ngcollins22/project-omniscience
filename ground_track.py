@@ -321,6 +321,8 @@ class TrackRunner(threading.Thread):
         1. Converts (lat, lon) → (x_mm, y_mm) via MapCalibration.to_mm()
         2. Issues a goto() command to the gantry (or logs a dry-run line)
         3. Polls GRBL state via worker.get_position() until the state is Idle
+        4. Calls measure_cb(idx, waypoint, gantry_pos) if supplied (blocks until
+           the callback returns — gantry stays at the waypoint position)
 
     Between waypoints the thread sleeps for the real-time equivalent of the
     inter-waypoint simulation interval divided by ``time_scale_factor``.
@@ -337,16 +339,18 @@ class TrackRunner(threading.Thread):
         time_scale_factor: float = 1.0,
         dry_run:           bool  = True,
         log_cb:            Optional[Callable[[str], None]] = None,
+        measure_cb:        Optional[Callable] = None,
     ):
         super().__init__(daemon=True, name="TrackRunner")
-        self._cal    = calibration
-        self._track  = track
-        self._worker = gantry_worker
-        self._speed  = speed_mm_min
-        self._tscale = time_scale_factor
-        self._dry    = dry_run
-        self._log    = log_cb or (lambda msg: None)
-        self._stop   = threading.Event()
+        self._cal        = calibration
+        self._track      = track
+        self._worker     = gantry_worker
+        self._speed      = speed_mm_min
+        self._tscale     = time_scale_factor
+        self._dry        = dry_run
+        self._log        = log_cb or (lambda msg: None)
+        self._measure_cb = measure_cb
+        self._stop       = threading.Event()
 
     def stop(self) -> None:
         """Signal the runner to abort after the current waypoint."""
@@ -385,6 +389,17 @@ class TrackRunner(threading.Thread):
                     f"→ X={x_mm:.2f}  Y={y_mm:.2f} mm"
                 )
                 self._wait_idle()
+
+            # Measurement callback — called after gantry is Idle at waypoint
+            if self._measure_cb is not None and not self._stop.is_set():
+                try:
+                    pos = (x_mm, y_mm)
+                    if not self._dry and self._worker is not None:
+                        raw, _ = self._worker.get_position()
+                        pos = (raw["x"], raw["y"])
+                    self._measure_cb(idx, wp, pos)
+                except Exception as exc:
+                    self._log(f"[WARN ] measure_cb raised at wp {idx + 1}: {exc}")
 
             # Time-scaled inter-waypoint delay
             if idx + 1 < len(wps):

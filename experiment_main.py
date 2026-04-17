@@ -78,6 +78,16 @@ try:
 except ImportError:
     _ORB_AVAILABLE = False
 
+# ── TRN (Terrain-Relative Navigation) import ─────────────────────────────────
+try:
+    from Experiments.localization.stl_dem import load_or_rasterize as _trn_load_dem
+    from Experiments.localization.lidar_trn import LidarTRN
+    from Experiments.localization.particle_filter import InitMode as TRNInitMode
+    from Experiments.localization.visualizer import TRNVisualizer
+    _TRN_AVAILABLE = True
+except ImportError:
+    _TRN_AVAILABLE = False
+
 # ── Display constants ─────────────────────────────────────────────────────────
 RS_W         = 640   # RealSense D435 native resolution
 RS_H         = 480
@@ -92,6 +102,7 @@ ORB_MAP_H    = 360   # height (2:1 matches a standard equirectangular Mars map)
 # ── Recording defaults ────────────────────────────────────────────────────────
 DEFAULT_RECORD_FPS   = 5       # frames per second saved during recording
 SESSIONS_ROOT        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions")
+DEFAULT_STL_PATH     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mars_output.stl")
 
 
 # ── Background worker: reads RealSense D435 frames off the main thread ────────
@@ -170,49 +181,30 @@ class ORBWorker(threading.Thread):
             self.result_q.put_nowait(("err", str(e)))
 
 
-# ── Background worker: runs LiDAR localization on a single frame ─────────────
-class LidarLocWorker(threading.Thread):
+# ── Background worker: runs one TRN static-test update off the main thread ────
+class TRNStaticTestWorker(threading.Thread):
     """
-    Receives one color frame (RGB uint8) and depth map (float32 metres, NaN=invalid),
-    runs the custom localization algorithm, and puts the result onto result_q.
+    Runs LidarTRN.update() for one depth frame and posts the result to result_q.
 
-    result_q items are either:
-        ("ok",  x_mm, y_mm)   – estimated gantry position in mm
-        ("err", error_string) – failure
+    result_q items:
+        ("ok",  TRNResult)      – success
+        ("err", error_string)   – failure
     """
 
-    def __init__(self,
-                 color_rgb: np.ndarray,
-                 depth_m:   np.ndarray,
-                 result_q:  queue.Queue):
-        super().__init__(daemon=True)
-        self.color_rgb = color_rgb
-        self.depth_m   = depth_m
-        self.result_q  = result_q
+    def __init__(self, trn, depth_m: np.ndarray,
+                 gantry_pos: tuple, result_q: queue.Queue):
+        super().__init__(daemon=True, name="TRNStaticTest")
+        self._trn        = trn
+        self._depth_m    = depth_m
+        self._gantry_pos = gantry_pos
+        self._result_q   = result_q
 
     def run(self):
         try:
-            x_mm, y_mm = self._localize(self.color_rgb, self.depth_m)
-            self.result_q.put_nowait(("ok", x_mm, y_mm))
-        except Exception as e:
-            self.result_q.put_nowait(("err", str(e)))
-
-    @staticmethod
-    def _localize(color_rgb: np.ndarray,
-                  depth_m:   np.ndarray) -> tuple[float, float]:
-        """
-        TODO: implement custom localization here.
-
-        Parameters
-        ----------
-        color_rgb : (H, W, 3) uint8   — RealSense color frame (RGB order)
-        depth_m   : (H, W) float32    — depth in metres; NaN = invalid pixel
-
-        Returns
-        -------
-        (x_mm, y_mm) : estimated gantry position in machine coordinates (mm)
-        """
-        raise NotImplementedError("LidarLocWorker._localize() not yet implemented")
+            result = self._trn.update(self._depth_m, self._gantry_pos)
+            self._result_q.put_nowait(("ok", result))
+        except Exception as exc:
+            self._result_q.put_nowait(("err", str(exc)))
 
 
 # ── Main application ──────────────────────────────────────────────────────────
@@ -306,19 +298,24 @@ class ExperimentApp(tk.Tk):
         self._lidar_record_status_var   = tk.StringVar(value="Idle")
         self._lidar_session_path_var    = tk.StringVar(value="—")
 
-        # ── LiDAR localization state ──────────────────────────────────────────
-        self._lidar_loc_running    = False
-        self._lidar_loc_worker     = None          # current LidarLocWorker (or None)
-        self._lidar_loc_result_q   = queue.Queue() # worker → main thread
-        self._lidar_loc_frame_count = 0
-        self._lidar_loc_est_gx_var = tk.StringVar(value="—")
-        self._lidar_loc_est_gy_var = tk.StringVar(value="—")
-        self._lidar_loc_gt_gx_var  = tk.StringVar(value="—")
-        self._lidar_loc_gt_gy_var  = tk.StringVar(value="—")
-        self._lidar_loc_status_var = tk.StringVar(value="Idle")
-        self._lidar_loc_count_var  = tk.StringVar(value="0")
-        self._lidar_loc_history_est = []   # list of (x_mm, y_mm) estimates
-        self._lidar_loc_history_gt  = []   # list of (x_mm, y_mm) gantry ground truth
+        # ── TRN (Terrain-Relative Navigation) state ───────────────────────────
+        # Corners shared with Run-tab map calibration (_map_corner_tl / _map_corner_br)
+        self._lidar_raster_dem      = None          # RasterDEM once loaded
+        self._lidar_trn             = None          # LidarTRN instance
+        self._lidar_trn_init_mode   = tk.StringVar(value="warm")
+        self._lidar_trn_dem_status_var = tk.StringVar(value="No DEM loaded")
+        self._lidar_trn_ncc_var     = tk.StringVar(value="—")
+        self._lidar_trn_ess_var     = tk.StringVar(value="—")
+        self._lidar_trn_est_x_var   = tk.StringVar(value="—")
+        self._lidar_trn_est_y_var   = tk.StringVar(value="—")
+        self._trn_tracking_window   = None          # TRNVisualizer window (live)
+        self._trn_test_worker       = None          # TRNStaticTestWorker thread
+        self._trn_result_q          = queue.Queue() # worker → main thread
+
+        # Legacy aliases kept so old polling code can be removed cleanly
+        self._lidar_loc_running     = False
+        self._lidar_loc_count_var   = tk.StringVar(value="0")
+        self._lidar_loc_status_var  = tk.StringVar(value="Idle")
 
         # ── ORB localization state ────────────────────────────────────────────
         self._orb_running      = False          # True while the loop is active
@@ -344,6 +341,10 @@ class ExperimentApp(tk.Tk):
 
         self._build_ui()
         self._after_id = self.after(POLL_MS, self._poll_cameras)
+
+        # Auto-load the terrain STL at startup (non-blocking — runs in background)
+        if _TRN_AVAILABLE and os.path.isfile(DEFAULT_STL_PATH):
+            self.after(100, lambda: self._load_stl_dem(DEFAULT_STL_PATH))
 
     # ── Top-level layout ──────────────────────────────────────────────────────
 
@@ -744,50 +745,63 @@ class ExperimentApp(tk.Tk):
         tk.Button(snap_sec, text="Snap & Plot 3D", command=self._snap_and_plot,
                   **self._btn(fg="#89b4fa")).grid(row=0, column=2, padx=(8, 8), pady=6)
 
-        # Localization
-        loc_sec = self._section(tab_content, "Localization")
 
-        loc_ctrl_row = tk.Frame(loc_sec, bg="#181825")
-        loc_ctrl_row.pack(fill=tk.X, padx=10, pady=(8, 4))
+        # ── Localization (TRN) ────────────────────────────────────────────────
+        loc_sec = self._section(tab_content, "Localization (TRN)")
 
-        self._lidar_loc_start_btn = tk.Button(
-            loc_ctrl_row, text="▶  Start Localization",
-            command=self._start_lidar_loc,
-            bg="#1e6640", fg="#a6e3a1", activebackground="#2a7a50",
+        # STL / DEM row — corners come from Run tab Map Calibration
+        dem_row = tk.Frame(loc_sec, bg="#181825")
+        dem_row.pack(fill=tk.X, padx=10, pady=(8, 4))
+        tk.Button(dem_row, text="Load STL…",
+                  command=self._load_stl_dem,
+                  **self._btn(fg="#cba6f7")).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(dem_row, text="DEM:", bg="#181825", fg="#585b70",
+                 font=("Consolas", 8)).pack(side=tk.LEFT)
+        tk.Label(dem_row, textvariable=self._lidar_trn_dem_status_var,
+                 bg="#181825", fg="#89b4fa",
+                 font=("Consolas", 8), anchor="w"
+                 ).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(dem_row,
+                 text="  (map corners from Run tab)",
+                 bg="#181825", fg="#585b70",
+                 font=("Consolas", 8, "italic")).pack(side=tk.LEFT, padx=(8, 0))
+
+        # Init mode radios
+        init_row = tk.Frame(loc_sec, bg="#181825")
+        init_row.pack(anchor="w", padx=10, pady=(8, 4))
+        tk.Label(init_row, text="Init mode:", bg="#181825", fg="#a6adc8",
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(0, 8))
+        for text, val in [("Warm start (near GT)", "warm"),
+                          ("Cold start (map centre)", "cold")]:
+            tk.Radiobutton(init_row, text=text, variable=self._lidar_trn_init_mode,
+                           value=val,
+                           bg="#181825", fg="#cdd6f4", selectcolor="#313244",
+                           activebackground="#181825", font=("Consolas", 9)
+                           ).pack(side=tk.LEFT, padx=(0, 16))
+
+        # Buttons row
+        loc_btn_row = tk.Frame(loc_sec, bg="#181825")
+        loc_btn_row.pack(anchor="w", padx=10, pady=(0, 4))
+        self._trn_static_test_btn = tk.Button(
+            loc_btn_row, text="Static Test",
+            command=self._trn_static_test,
+            bg="#1e4a6e", fg="#89b4fa", activebackground="#2a5a80",
             font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=10, pady=4)
-        self._lidar_loc_start_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._trn_static_test_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        self._lidar_loc_stop_btn = tk.Button(
-            loc_ctrl_row, text="■  Stop",
-            command=self._stop_lidar_loc,
-            bg="#6e2020", fg="#f38ba8", activebackground="#7e3030",
-            font=("Consolas", 9, "bold"), relief=tk.FLAT, padx=10, pady=4,
-            state=tk.DISABLED)
-        self._lidar_loc_stop_btn.pack(side=tk.LEFT, padx=(0, 16))
+        tk.Button(loc_btn_row, text="Open Tracking View",
+                  command=self._open_trn_tracking_window,
+                  **self._btn(fg="#cba6f7")).pack(side=tk.LEFT, padx=(0, 8))
 
-        tk.Label(loc_ctrl_row, text="Status:", bg="#181825", fg="#585b70",
-                 font=("Consolas", 8)).pack(side=tk.LEFT)
-        self._lidar_loc_status_lbl = tk.Label(
-            loc_ctrl_row, textvariable=self._lidar_loc_status_var,
-            bg="#181825", fg="#a6adc8",
-            font=("Consolas", 8, "bold"), width=14, anchor="w")
-        self._lidar_loc_status_lbl.pack(side=tk.LEFT, padx=(3, 16))
-
-        tk.Label(loc_ctrl_row, text="Frames:", bg="#181825", fg="#585b70",
-                 font=("Consolas", 8)).pack(side=tk.LEFT)
-        tk.Label(loc_ctrl_row, textvariable=self._lidar_loc_count_var,
-                 bg="#181825", fg="#cdd6f4",
-                 font=("Consolas", 8), width=6, anchor="w"
-                 ).pack(side=tk.LEFT, padx=(3, 0))
-
+        # Readouts
         loc_readout_row = tk.Frame(loc_sec, bg="#181825")
         loc_readout_row.pack(fill=tk.X, padx=10, pady=(0, 8))
 
         for lbl_text, var, fg_col in (
-            ("Est X mm:", self._lidar_loc_est_gx_var, "#cba6f7"),
-            ("Est Y mm:", self._lidar_loc_est_gy_var, "#cba6f7"),
-            ("GT X mm:",  self._lidar_loc_gt_gx_var,  "#a6e3a1"),
-            ("GT Y mm:",  self._lidar_loc_gt_gy_var,  "#a6e3a1"),
+            ("Est X mm:", self._lidar_trn_est_x_var, "#cba6f7"),
+            ("Est Y mm:", self._lidar_trn_est_y_var, "#cba6f7"),
+            ("NCC:",      self._lidar_trn_ncc_var,   "#89b4fa"),
+            ("ESS:",      self._lidar_trn_ess_var,   "#a6e3a1"),
         ):
             tk.Label(loc_readout_row, text=lbl_text, bg="#181825", fg="#585b70",
                      font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 2))
@@ -1587,99 +1601,257 @@ class ExperimentApp(tk.Tk):
 
     # ── LiDAR localization ────────────────────────────────────────────────────
 
-    def _start_lidar_loc(self) -> None:
-        if self._rs_pipeline is None:
-            self._log("[WARN ] LiDAR Loc: RealSense not connected.")
-            return
-        self._lidar_loc_running = True
-        self._lidar_loc_frame_count = 0
-        self._lidar_loc_count_var.set("0")
-        self._lidar_loc_history_est.clear()
-        self._lidar_loc_history_gt.clear()
-        self._lidar_loc_start_btn.configure(state=tk.DISABLED)
-        self._lidar_loc_stop_btn.configure(state=tk.NORMAL)
-        self._lidar_loc_status_var.set("Running")
-        self._lidar_loc_status_lbl.configure(fg="#a6e3a1")
-        self._log("[INFO ] LiDAR localization started.")
-        self._dispatch_lidar_loc()
+    # ── TRN: DEM loading ──────────────────────────────────────────────────────
 
-    def _stop_lidar_loc(self) -> None:
-        self._lidar_loc_running = False
-        self._lidar_loc_start_btn.configure(state=tk.NORMAL)
-        self._lidar_loc_stop_btn.configure(state=tk.DISABLED)
-        self._lidar_loc_status_var.set("Idle")
-        self._lidar_loc_status_lbl.configure(fg="#a6adc8")
-        self._log("[INFO ] LiDAR localization stopped.")
+    def _load_stl_dem(self, path: str = "") -> None:
+        """Load an STL, rasterize it (or use cache), and build TRN.
 
-    def _dispatch_lidar_loc(self) -> None:
-        """Start a LidarLocWorker for the most recent frame if none is running."""
-        if not self._lidar_loc_running:
+        If *path* is empty or omitted, opens a file-chooser dialog.
+        """
+        if not _TRN_AVAILABLE:
+            self._log("[ERROR] TRN module not available — check Experiments/localization/")
             return
-        if self._lidar_loc_worker is not None and self._lidar_loc_worker.is_alive():
+        if not path:
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(
+                title="Select terrain STL",
+                filetypes=[("STL files", "*.stl"), ("All files", "*.*")],
+            )
+        if not path:
             return
-        if self._last_grayscale is None or self._last_depth_m is None:
-            self._log("[WARN ] LiDAR Loc: no frame available yet.")
+
+        self._lidar_trn_dem_status_var.set("Rasterizing…")
+        self._log(f"[TRN  ] Loading DEM from {path} …")
+
+        def _do_load():
+            try:
+                dem = _trn_load_dem(path, res_mm=1.0)
+                self.after(0, lambda: self._on_dem_loaded(dem, path))
+            except Exception as exc:
+                err = str(exc)
+                self.after(0, lambda: self._on_dem_error(err))
+
+        threading.Thread(target=_do_load, daemon=True).start()
+
+    def _on_dem_loaded(self, dem, path: str) -> None:
+        self._lidar_raster_dem = dem
+        self._lidar_trn_dem_status_var.set(
+            f"{os.path.basename(path)}  ({dem.nx}×{dem.ny} px)")
+        self._log(f"[TRN  ] DEM loaded: {dem.nx}×{dem.ny} px")
+        self._build_lidar_trn()
+        if self._lidar_trn is None:
+            self._log("[WARN ] TRN: record map corners in the Run tab to finish setup.")
+
+    def _on_dem_error(self, err: str) -> None:
+        self._lidar_trn_dem_status_var.set("Load failed")
+        self._log(f"[ERROR] DEM load failed: {err}")
+
+    def _build_lidar_trn(self) -> None:
+        """Instantiate (or replace) the LidarTRN using current DEM + Run-tab corners."""
+        if not _TRN_AVAILABLE:
             return
-        self._lidar_loc_worker = LidarLocWorker(
-            self._last_grayscale.copy(),
-            self._last_depth_m.copy(),
-            self._lidar_loc_result_q,
+        if self._lidar_raster_dem is None:
+            return
+        if self._map_corner_tl is None or self._map_corner_br is None:
+            return
+        if not _PROJECTION_AVAILABLE:
+            self._log("[ERROR] TRN: RealSenseProjectionModel not available.")
+            return
+
+        altitude_mm = float(self._cfg.gantry.camera_altitude_mm or 100.0)
+        model = RealSenseProjectionModel(self._cfg.realsense, altitude_mm)
+
+        self._lidar_trn = LidarTRN(
+            dem              = self._lidar_raster_dem,
+            projection_model = model,
+            sim_cfg          = self._cfg.simulation,
+            altitude_mm      = altitude_mm,
+            corner_tl        = self._map_corner_tl,
+            corner_br        = self._map_corner_br,
         )
-        self._lidar_loc_worker.start()
-        self._lidar_loc_status_var.set("Processing…")
-        self._lidar_loc_status_lbl.configure(fg="#fab387")
+        self._log("[TRN  ] LidarTRN built and ready.")
 
-    def _poll_lidar_loc(self) -> None:
-        """Drain the result queue and dispatch the next frame when the worker is done."""
-        try:
-            while True:
-                item = self._lidar_loc_result_q.get_nowait()
-                self._lidar_loc_handle_result(item)
-        except queue.Empty:
-            pass
+    # ── TRN: Static test ──────────────────────────────────────────────────────
 
-        if self._lidar_loc_running:
-            if self._lidar_loc_worker is None or not self._lidar_loc_worker.is_alive():
-                self._dispatch_lidar_loc()
-
-    def _lidar_loc_handle_result(self, item: tuple) -> None:
-        if item[0] == "err":
-            self._log(f"[WARN ] LiDAR Loc: {item[1]}")
-            if self._lidar_loc_running:
-                self._lidar_loc_status_var.set("Error")
-                self._lidar_loc_status_lbl.configure(fg="#f38ba8")
+    def _trn_static_test(self) -> None:
+        """Fire one TRN update on the current frame (button-triggered)."""
+        if not _TRN_AVAILABLE:
+            self._log("[ERROR] TRN module not available.")
+            return
+        if self._lidar_trn is None:
+            if not self._build_lidar_trn_silent():
+                self._log("[WARN ] TRN: not ready — load STL and record corners first.")
+                return
+        if self._last_depth_m is None:
+            self._log("[WARN ] TRN: no depth frame yet — connect RealSense first.")
+            return
+        if self._trn_test_worker is not None and self._trn_test_worker.is_alive():
+            self._log("[WARN ] TRN: test already running.")
             return
 
-        _, est_x_mm, est_y_mm = item
-
-        self._lidar_loc_frame_count += 1
-        self._lidar_loc_count_var.set(str(self._lidar_loc_frame_count))
-        self._lidar_loc_history_est.append((est_x_mm, est_y_mm))
-        self._lidar_loc_est_gx_var.set(f"{est_x_mm:.1f}")
-        self._lidar_loc_est_gy_var.set(f"{est_y_mm:.1f}")
-
+        # Get current gantry position for the motion model seed
         if self._gantry_worker is not None:
             try:
                 pos, _ = self._gantry_worker.get_position()
-                gt_x, gt_y = pos["x"], pos["y"]
-                self._lidar_loc_gt_gx_var.set(f"{gt_x:.1f}")
-                self._lidar_loc_gt_gy_var.set(f"{gt_y:.1f}")
-                self._lidar_loc_history_gt.append((gt_x, gt_y))
+                gantry_pos = (pos["x"], pos["y"])
             except Exception:
-                self._lidar_loc_gt_gx_var.set("no gantry")
-                self._lidar_loc_gt_gy_var.set("no gantry")
+                gantry_pos = (0.0, 0.0)
         else:
-            self._lidar_loc_gt_gx_var.set("no gantry")
-            self._lidar_loc_gt_gy_var.set("no gantry")
+            gantry_pos = (0.0, 0.0)
+
+        mode_str = self._lidar_trn_init_mode.get()
+        init_mode = TRNInitMode.WARM if mode_str == "warm" else TRNInitMode.COLD
+        self._lidar_trn.reset(gantry_pos if mode_str == "warm" else None, init_mode)
+
+        self._trn_static_test_btn.configure(state=tk.DISABLED)
+        self._lidar_trn_ncc_var.set("…")
+        self._lidar_trn_ess_var.set("…")
+
+        self._trn_test_worker = TRNStaticTestWorker(
+            self._lidar_trn,
+            self._last_depth_m.copy(),
+            gantry_pos,
+            self._trn_result_q,
+        )
+        self._trn_test_worker.start()
+        self._log("[TRN  ] Static test started…")
+
+    def _build_lidar_trn_silent(self) -> bool:
+        """Try to build TRN without extra warnings; return True on success."""
+        if (self._lidar_raster_dem is not None
+                and self._map_corner_tl is not None
+                and self._map_corner_br is not None
+                and _PROJECTION_AVAILABLE):
+            self._build_lidar_trn()
+            return self._lidar_trn is not None
+        return False
+
+    def _poll_lidar_loc(self) -> None:
+        """Drain the TRN result queue and handle results."""
+        try:
+            while True:
+                item = self._trn_result_q.get_nowait()
+                self._trn_handle_result(item)
+        except queue.Empty:
+            pass
+
+    def _trn_handle_result(self, item: tuple) -> None:
+        """Handle a result from TRNStaticTestWorker or the measure_cb queue."""
+        if item[0] == "err":
+            self._log(f"[WARN ] TRN: {item[1]}")
+            try:
+                self._trn_static_test_btn.configure(state=tk.NORMAL)
+            except Exception:
+                pass
+            return
+
+        _, result = item
+        self._lidar_trn_est_x_var.set(f"{result.x_est_mm:.1f}")
+        self._lidar_trn_est_y_var.set(f"{result.y_est_mm:.1f}")
+        self._lidar_trn_ncc_var.set(f"{result.ncc_score:.3f}")
+        self._lidar_trn_ess_var.set(f"{result.ess:.0f}")
 
         self._log(
-            f"[LOC  ] frame {self._lidar_loc_frame_count}  "
-            f"est=({est_x_mm:.1f}, {est_y_mm:.1f}) mm"
+            f"[TRN  ] est=({result.x_est_mm:.1f}, {result.y_est_mm:.1f}) mm  "
+            f"NCC={result.ncc_score:.3f}  ESS={result.ess:.0f}"
         )
 
-        if self._lidar_loc_running:
-            self._lidar_loc_status_var.set("Running")
-            self._lidar_loc_status_lbl.configure(fg="#a6e3a1")
+        # Update tracking window if open
+        if self._trn_tracking_window is not None:
+            try:
+                gantry_pos = None
+                if self._gantry_worker is not None:
+                    try:
+                        pos, _ = self._gantry_worker.get_position()
+                        gantry_pos = (pos["x"], pos["y"])
+                    except Exception:
+                        pass
+                self._trn_tracking_window.update_result(result, gantry_pos)
+            except Exception:
+                pass
+
+        # Show static-test visualizer for button-triggered runs
+        if item[0] == "ok" and (self._trn_test_worker is not None
+                                 and not self._trn_test_worker.is_alive()):
+            try:
+                self._trn_static_test_btn.configure(state=tk.NORMAL)
+            except Exception:
+                pass
+            if _TRN_AVAILABLE and _MPL_AVAILABLE:
+                self._open_trn_static_viz(result)
+
+    def _open_trn_static_viz(self, result) -> None:
+        """Open a 4-panel TRNVisualizer window for the static-test result."""
+        try:
+            gantry_pos = None
+            if self._gantry_worker is not None:
+                try:
+                    pos, _ = self._gantry_worker.get_position()
+                    gantry_pos = (pos["x"], pos["y"])
+                except Exception:
+                    pass
+            viz = TRNVisualizer(
+                self, self._lidar_raster_dem,
+                self._map_corner_tl, self._map_corner_br,
+                mode="static",
+            )
+            viz.show_result(
+                result, gantry_pos,
+                depth_m=self._last_depth_m,
+                projection_model=self._lidar_trn._model,
+            )
+        except Exception as exc:
+            self._log(f"[WARN ] TRN viz: {exc}")
+
+    # ── TRN: Live tracking window ─────────────────────────────────────────────
+
+    def _open_trn_tracking_window(self) -> None:
+        if not _TRN_AVAILABLE:
+            self._log("[ERROR] TRN module not available.")
+            return
+        if self._lidar_raster_dem is None or self._map_corner_tl is None:
+            self._log("[WARN ] TRN: load STL and record map corners (Run tab) before opening tracking view.")
+            return
+        if self._trn_tracking_window is not None:
+            try:
+                self._trn_tracking_window.win.lift()
+                return
+            except Exception:
+                self._trn_tracking_window = None
+
+        self._trn_tracking_window = TRNVisualizer(
+            self, self._lidar_raster_dem,
+            self._map_corner_tl, self._map_corner_br,
+            mode="live",
+        )
+        self._trn_tracking_window.win.protocol(
+            "WM_DELETE_WINDOW", self._close_trn_window)
+        self._log("[TRN  ] Live tracking window opened.")
+
+    def _close_trn_window(self) -> None:
+        if self._trn_tracking_window is not None:
+            try:
+                self._trn_tracking_window.win.destroy()
+            except Exception:
+                pass
+            self._trn_tracking_window = None
+
+    # ── TRN: measure_cb for TrackRunner ──────────────────────────────────────
+
+    def _trn_measure_cb(self, idx: int, wp, gantry_pos: tuple) -> None:
+        """
+        Called by TrackRunner (from its daemon thread) after each waypoint.
+        Runs TRN.update() synchronously — gantry waits while this executes.
+        Posts result to _trn_result_q so the main thread can update the UI.
+        """
+        if self._lidar_trn is None or self._last_depth_m is None:
+            return
+        try:
+            depth_copy = self._last_depth_m.copy()
+            result = self._lidar_trn.update(depth_copy, gantry_pos)
+            self._trn_result_q.put_nowait(("ok", result))
+        except Exception as exc:
+            self._trn_result_q.put_nowait(("err", str(exc)))
 
     # ── FPS control ───────────────────────────────────────────────────────────
 
@@ -2173,6 +2345,24 @@ class ExperimentApp(tk.Tk):
 
         tscale = self._cfg.simulation.time_scale_factor or 1.0
 
+        # Reset TRN for this run if available
+        measure_cb = None
+        if _TRN_AVAILABLE and self._lidar_trn is not None and not dry_run:
+            mode_str = self._lidar_trn_init_mode.get()
+            init_mode = TRNInitMode.WARM if mode_str == "warm" else TRNInitMode.COLD
+            # Warm-start from current gantry position
+            if self._gantry_worker is not None:
+                try:
+                    pos0, _ = self._gantry_worker.get_position()
+                    init_pos = (pos0["x"], pos0["y"])
+                except Exception:
+                    init_pos = None
+            else:
+                init_pos = None
+            self._lidar_trn.reset(init_pos, init_mode)
+            measure_cb = self._trn_measure_cb
+            self._log("[TRN  ] TRN armed for track run.")
+
         runner = TrackRunner(
             calibration=cal,
             track=self._ground_track,
@@ -2181,6 +2371,7 @@ class ExperimentApp(tk.Tk):
             time_scale_factor=tscale,
             dry_run=dry_run,
             log_cb=self._log,
+            measure_cb=measure_cb,
         )
         self._track_runner = runner
         runner.start()
@@ -2220,6 +2411,7 @@ class ExperimentApp(tk.Tk):
         self._log(f"[INFO ] Map corner BR recorded: X={pos['x']:.2f} Y={pos['y']:.2f} mm")
         self._update_map_size_display()
         self._rebuild_map_calibration()
+        self._build_lidar_trn()
 
     def _record_corner_tl(self) -> None:
         if self._gantry_worker is None:
@@ -2231,6 +2423,7 @@ class ExperimentApp(tk.Tk):
         self._log(f"[INFO ] Map corner TL recorded: X={pos['x']:.2f} Y={pos['y']:.2f} mm")
         self._update_map_size_display()
         self._rebuild_map_calibration()
+        self._build_lidar_trn()
 
     def _update_map_size_display(self) -> None:
         if self._map_corner_br is None or self._map_corner_tl is None:
@@ -2438,6 +2631,7 @@ class ExperimentApp(tk.Tk):
                     self._last_depth_rgb = depth_colorized
                     self._draw(self._depth_canvas, depth_colorized, RS_W, RS_H)
                     self._draw(self._gray_canvas,  color_rgb,       RS_W, RS_H)
+                    self._draw_crosshair(self._gray_canvas, RS_W, RS_H)
                     self._maybe_capture_lidar_frame(color_rgb, depth_m)
             except RuntimeError:
                 pass   # no frame ready within 1 ms — normal between frames
@@ -2873,8 +3067,8 @@ class ExperimentApp(tk.Tk):
             self._stop_recording()
         if self._lidar_recording:
             self._stop_lidar_recording()
-        if self._lidar_loc_running:
-            self._stop_lidar_loc()
+        self._close_trn_window()
+        self._close_snap_window()
         self._stop_orb()
         self._disconnect_rs()
         self._disconnect_arducam()
