@@ -1514,14 +1514,6 @@ class ExperimentApp(tk.Tk):
         )
 
     def _maybe_capture_frame(self, frame_bgr: np.ndarray) -> None:
-        """
-        Called every GUI poll with the latest ArduCam frame (BGR).
-        Saves a JPEG and writes one row to session.csv, throttled to target FPS.
-
-        CSV columns: timestamp_s, filepath, x_mm, y_mm, z_mm, lat_deg, lon_deg
-        lat/lon are derived from the current gantry position using the calibrated
-        map corners (TL = 90°lat/0°lon, BR = -90°lat/360°lon).
-        """
         if not self._recording:
             return
 
@@ -1547,11 +1539,11 @@ class ExperimentApp(tk.Tk):
         if self._gantry_worker is not None:
             try:
                 pos, _ = self._gantry_worker.get_position()
-                lat, lon = self._map_calibration.to_lat_lon(pos["x"], pos["y"])
+                gx, gy, gz = pos["x"], pos["y"], pos["z"]
             except Exception:
                 pass
 
-        # ── Lat/lon from gantry position ──────────────────────────────────
+         # ── Lat/lon from gantry position ──────────────────────────────────
         lat_deg, lon_deg = self._gantry_mm_to_lat_lon(gx, gy)
 
         try:

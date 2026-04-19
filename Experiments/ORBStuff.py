@@ -93,7 +93,7 @@ def ORB():
 """simple function that takes in a query image and returns the center of where it is in the hardcoded reference image
 return: a tuple containing first a list of the pixel cords of the center of the query image, and second the resolution
  of the reference image so another function can use that info to convert the scale"""
-def getPosePixelCords(img1,numfeatures=50000) -> tuple[list, list]:
+def getPosePixelCords(img1,numfeatures=100000) -> tuple[list, list]:
     #start = time.time()
     root = os.getcwd()
     #img1Path = os.path.join(root, queryImageFilePath) #query image
@@ -124,11 +124,11 @@ def getPosePixelCords(img1,numfeatures=50000) -> tuple[list, list]:
         if len(pair) < 2:
             continue
         m, n = pair
-        if m.distance < 0.7 * n.distance:
+        if m.distance < 0.85 * n.distance:
             good.append(m)
 
     # Using homography
-    if len(good)>6:
+    if len(good)>9:
         src_pts = np.float32([ kp1[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
         dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
  
@@ -241,8 +241,8 @@ def simulatedExperiment():
 
 
 
-def postProcess(folderFilePath, BLx, BLy, TRx, TRy, numfeatures=50000,
-                output_csv_name="session_with_estimates.csv",
+def postProcess(folderFilePath, BLx, BLy, TRx, TRy, numfeatures=100000,
+                output_csv_name="session_with_estimates_knn95_min10.csv",
                 overwrite_original=False):
     """
     Processes each image in session.csv, estimates pixel position, converts to lat/lon,
@@ -394,7 +394,7 @@ def postProcess(folderFilePath, BLx, BLy, TRx, TRy, numfeatures=50000,
     plt.plot(
         estimated_lon,
         estimated_lat,
-        color='purple',
+        color='cyan',
         linewidth=2,
         label='Estimated Pose'
     )
@@ -402,7 +402,7 @@ def postProcess(folderFilePath, BLx, BLy, TRx, TRy, numfeatures=50000,
     plt.scatter(
         estimated_lon,
         estimated_lat,
-        color='purple',
+        color='cyan',
         s=5
     )
 
@@ -445,6 +445,6 @@ if __name__ == '__main__':
     #ORB()
     #print(getPosePixelCords("mars_cropped_4k_1.jpg"))
     #simulatedExperiment()
-    postProcess(r"sessions\20260415_113758", -378, -788, 23, -3)
+    postProcess(r"sessions\20260419_141054", -378, -788, 23, -3)
 
     
